@@ -232,7 +232,7 @@ class ChannelSyncRepository(
                         val oldChannels = chatDb.channelDao().getAllSync()
                         for (old in oldChannels) {
                             if (old.lastChatDate > 0L) {
-                                existingLastChat[old.channelCode] = Triple(old.lastChatDate, old.lastChatContents, old.masterUserId)
+                                existingLastChat[old.channelCode] = Triple(old.lastChatDate, old.lastChatContents, old.lastSendUserId)
                             }
                         }
                         chatDb.channelDao().deleteAllSync()
@@ -240,7 +240,7 @@ class ChannelSyncRepository(
                         for (i in channels.indices) {
                             val saved = existingLastChat[channels[i].channelCode]
                             if (saved != null) {
-                                channels[i] = channels[i].copy(lastChatDate = saved.first, lastChatContents = saved.second, masterUserId = saved.third)
+                                channels[i] = channels[i].copy(lastChatDate = saved.first, lastChatContents = saved.second, lastSendUserId = saved.third)
                             }
                         }
                     }
@@ -401,7 +401,7 @@ class ChannelSyncRepository(
                             channelCode = channelCode,
                             date = chatObj.optLong("sendDate", 0L),
                             contents = chatObj.optString("contents", ""),
-                            masterUserId = chatObj.optString("sendUserId", "")
+                            lastSendUserId = chatObj.optString("sendUserId", "")
                         )
                     }
                     if (lastEventId > lastOffset) {

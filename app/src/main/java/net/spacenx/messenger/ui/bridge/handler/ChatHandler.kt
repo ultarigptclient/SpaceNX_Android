@@ -203,7 +203,7 @@ class ChatHandler(
                         chatDb.channelDao().insert(existingChannel.copy(
                             lastChatDate = sendDate,
                             lastChatContents = body.optString("contents", ""),
-                            masterUserId = myId
+                            lastSendUserId = myId
                         ))
                     }
                     // sendChat 성공: 본인 offset 저장 (서버 dateTime 기준)

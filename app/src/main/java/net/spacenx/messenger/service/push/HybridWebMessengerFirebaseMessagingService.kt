@@ -108,21 +108,22 @@ class HybridWebMessengerFirebaseMessagingService : FirebaseMessagingService() {
         val msg = data["msg"] ?: ""
         val key = data["key"] ?: ""
         val systemName = data["systemName"] ?: ""
+        val senderId = data["id"] ?: data["senderId"] ?: data["userId"] ?: ""
 
-        Log.d(TAG, "handleFlatPushData: comm=$comm, key=$key, name=$name")
+        Log.d(TAG, "handleFlatPushData: comm=$comm, key=$key, name=$name, senderId=$senderId")
 
         if (msg.startsWith("ptt://")) return
 
         when (comm) {
-            "chat" -> sendNotification(Constants.TYPE_TALK, key, name, msg, null)
-            "message" -> sendNotification(Constants.TYPE_MESSAGE, key, name, msg, null)
+            "chat" -> sendNotification(Constants.TYPE_TALK, key, name, msg, null, senderId)
+            "message" -> sendNotification(Constants.TYPE_MESSAGE, key, name, msg, null, senderId)
             "noti" -> {
                 val title = if (systemName.isNotEmpty()) "[$systemName] $msg" else msg
                 sendNotification(Constants.TYPE_SYSTEM_NOTIFY, key, name, title, null)
             }
             else -> {
                 when (key) {
-                    "MSG" -> sendNotification(Constants.TYPE_MESSAGE, key, name, msg, null)
+                    "MSG" -> sendNotification(Constants.TYPE_MESSAGE, key, name, msg, null, senderId)
                     "NOTI" -> sendNotification(Constants.TYPE_SYSTEM_NOTIFY, key, name, msg, null)
                     "CUSTOM" -> sendNotification(Constants.TYPE_CUSTOM, key, name, msg, null)
                     else -> if (msg.isNotEmpty()) sendNotification(Constants.TYPE_TALK, key, name, msg, null)
@@ -155,6 +156,10 @@ class HybridWebMessengerFirebaseMessagingService : FirebaseMessagingService() {
 
     private fun processDataEntry(value: String) {
         try {
+            Log.d(TAG, "processDataEntry raw: $value")
+            //processDataEntry raw: {"id":"jse","name":"전수은","comm":"대화3","systemName":null,"key":"mo19sh5rUFZFajikBcF","date":"1776338366677","PCICON":"Y","badgeCount":1024,"messageType":"CHAT"}
+            //processDataEntry raw: {"id":null,"name":"","comm":"<p style=\"text-align: left;\">4444444444</p>","systemName":null,"key":"MESSAGE","date":null,"PCICON":"Y","badgeCount":1025,"messageType":"MESSAGE"}
+
             val myId = Constants.getMyId(applicationContext)
             if (myId.isNullOrEmpty()) return
 
@@ -180,7 +185,7 @@ class HybridWebMessengerFirebaseMessagingService : FirebaseMessagingService() {
                 "NOTI"           -> "새 알림이 도착했습니다."
                 else             -> "새 메시지가 도착했습니다."
             }
-            val senderId = json.optString("id", "")
+            val senderId = json.optString("id", "").takeIf { it != "null" } ?: ""
             val userName = json.optString("name", "")
             val systemName = json.optString("systemName", "")
             val url = json.optString("url", "")
@@ -230,7 +235,7 @@ class HybridWebMessengerFirebaseMessagingService : FirebaseMessagingService() {
         }
 
         when (key) {
-            "MSG" -> sendNotification(Constants.TYPE_MESSAGE, key, userName, content, null)
+            "MSG", "MESSAGE" -> sendNotification(Constants.TYPE_MESSAGE, key, userName, content, null, senderId)
             "OTHER" -> { /* silent badge only */ }
             "NOTI" -> sendNotification(Constants.TYPE_SYSTEM_NOTIFY, key, userName, content, null)
             "CUSTOM" -> sendNotification(Constants.TYPE_CUSTOM, key, userName, content, null)
@@ -265,6 +270,16 @@ class HybridWebMessengerFirebaseMessagingService : FirebaseMessagingService() {
             && net.spacenx.messenger.common.AppState.activeChannelCode == key
         ) {
             Log.d(TAG, "sendNotification: suppressed (active channel $key)")
+            return
+        }
+
+        // 포그라운드 상태에서 MSG FCM 억제: 소켓이 SendMessageEvent/ReadMessageEvent를
+        // 실시간으로 처리하므로 FCM은 중복. 특히 서버가 쪽지 발신자에게도 FCM을 잘못
+        // 전송하는 경우 자기 자신에게 알림이 뜨는 문제를 방지.
+        if (type == Constants.TYPE_MESSAGE
+            && net.spacenx.messenger.common.AppState.isForeground
+        ) {
+            Log.d(TAG, "sendNotification: suppressed MSG (foreground)")
             return
         }
 

@@ -39,6 +39,8 @@ class ChannelActionHandler(
             "removeChannel" -> handleRemoveChannel(params)
             "findChannelByMembers" -> handleFindChannelByMembers(params)
             "getChannel" -> handleGetChannel(params)
+            "deleteRoom" -> handleDeleteRoom(params)
+            "openChatRoom" -> handleOpenChatRoom(params)
         }
     }
 
@@ -409,6 +411,49 @@ class ChannelActionHandler(
             ctx.resolveToJs("findChannelByMembers", JSONObject().put("channelCode", channelCode ?: ""))
         } catch (e: Exception) {
             ctx.rejectToJs("findChannelByMembers", e.message)
+        }
+    }
+
+    private suspend fun handleDeleteRoom(params: Map<String, Any?>) {
+        try {
+            val channelCode = ctx.paramStr(params, "channelCode")
+            val myId = ctx.appConfig.getSavedUserId() ?: ""
+            val result = withContext(Dispatchers.IO) {
+                ApiClient.postJson(
+                    ctx.appConfig.getEndpointByPath("/comm/destroychannel"),
+                    JSONObject().put("channelCode", channelCode).put("userId", myId)
+                )
+            }
+            if (result.optInt("errorCode", -1) == 0 && channelCode.isNotEmpty()) {
+                withContext(Dispatchers.IO) {
+                    val chatDb = ctx.dbProvider.getChatDatabase()
+                    chatDb.channelMemberDao()?.deleteByChannel(channelCode)
+                    chatDb.chatDao().deleteByChannel(channelCode)
+                    chatDb.channelDao().deleteByChannelCode(channelCode)
+                    Log.d(TAG, "deleteRoom: local data purged for channelCode=$channelCode")
+                }
+            }
+            ctx.resolveToJs("deleteRoom", result)
+        } catch (e: Exception) {
+            ctx.rejectToJs("deleteRoom", e.message)
+        }
+    }
+
+    private suspend fun handleOpenChatRoom(params: Map<String, Any?>) {
+        try {
+            val userId = ctx.paramStr(params, "userId")
+            val myId = ctx.appConfig.getSavedUserId() ?: ""
+            val result = withContext(Dispatchers.IO) {
+                val body = JSONObject().put("users", JSONArray().put(myId).put(userId)).put("sendUserId", myId)
+                ApiClient.postJson(ctx.appConfig.getEndpointByPath("/comm/makechannel"), body)
+            }
+            val channelCode = result.optString("channelCode", "")
+            if (channelCode.isNotEmpty()) {
+                withContext(Dispatchers.IO) { ctx.saveChannelLocally(channelCode, listOf(myId, userId)) }
+            }
+            ctx.resolveToJs("openChatRoom", result)
+        } catch (e: Exception) {
+            ctx.rejectToJs("openChatRoom", e.message)
         }
     }
 

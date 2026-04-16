@@ -74,23 +74,42 @@ class MainActivity : AppCompatActivity() {
          * React가 openUserDetail을 20개 동시 호출하면 슬롯이 마지막 것으로 덮어써져
          * 나머지 19개가 10초 타임아웃. 이 shim은 userId별 resolver 큐를 유지한다.
          */
+        /**
+         * openUserDetail 중복 호출 방어 shim.
+         *
+         * JS 브릿지는 window._openUserDetail_<cbId>Resolve = resolve 로 콜백을 등록한다.
+         * 동일 userId 를 두 컴포넌트가 동시에 요청하면 두 번째 등록이 첫 번째를 덮어써서
+         * 첫 번째 Promise 가 10 초 타임아웃된다.
+         *
+         * 해결책:
+         *  - JSON.stringify 를 래핑해 postMessage 직전 시점에
+         *    window._<cbId>Resolve 를 캡처 → cbId 별 배열(pm)에 보관 → window 키를 null 로 초기화
+         *  - 두 번째 할당도 같은 방식으로 캡처 → pm[cbId] = [resolveA, resolveB]
+         *  - Android 가 resolveToJs 대신 window.__oudResolve(cbId, data) 를 호출하면
+         *    모든 수집된 resolve 함수를 한 번에 호출
+         *
+         * 이전 버전의 버그:
+         *  - window._openUserDetailResolve (존재하지 않는 키) 를 참조 → 항상 undefined
+         *  - pm 키로 userId 를 사용했으나 native 는 cbId 로 호출 → 매핑 불일치
+         */
         private const val BRIDGE_SHIM_JS = "(function(){" +
             "if(window.__bridgeShimInstalled)return;" +
             "window.__bridgeShimInstalled=true;" +
             "var pm={};" +
-            // JSON.stringify 래핑: openUserDetail 직렬화 시점에
-            // window._openUserDetailResolve (현재 resolve fn)를 userId별 큐에 저장
+            // JSON.stringify 래핑: postMessage 직전 _callbackId 기반 키로 resolve fn 캡처
             "var os=JSON.stringify;" +
             "JSON.stringify=function(o){" +
-            "if(o&&o.action==='openUserDetail'&&o.userId){" +
-            "var fn=window._openUserDetailResolve;" +
-            "if(fn){(pm[o.userId]=pm[o.userId]||[]).push(fn);" +
-            "window._openUserDetailResolve=null;}}" +
+            "if(o&&typeof o==='object'&&o.action==='openUserDetail'&&o._callbackId){" +
+            "var key='_'+o._callbackId+'Resolve';" +
+            "var fn=window[key];" +
+            "if(typeof fn==='function'){" +
+            "(pm[o._callbackId]=pm[o._callbackId]||[]).push(fn);" +
+            "window[key]=null;}}" +
             "return os.apply(JSON,arguments);};" +
-            // Android가 호출할 userId별 resolve 함수
-            "window.__oudResolve=function(uid,d){" +
-            "if(pm[uid]&&pm[uid].length){" +
-            "var fns=pm[uid].splice(0);delete pm[uid];" +
+            // Android OrgHandler 가 호출: pm[cbId] 에 쌓인 resolve 전부 실행
+            "window.__oudResolve=function(cbId,d){" +
+            "if(pm[cbId]&&pm[cbId].length){" +
+            "var fns=pm[cbId].splice(0);delete pm[cbId];" +
             "for(var i=0;i<fns.length;i++){try{fns[i](d);}catch(e){}}" +
             "return true;}return false;};" +
             "})();"
@@ -1007,6 +1026,63 @@ class MainActivity : AppCompatActivity() {
             override fun onReceivedSslError(
                 view: WebView?, handler: android.webkit.SslErrorHandler?, error: android.net.http.SslError?
             ) { handler?.proceed() }
+
+            /**
+             * 임시 방어책: 동일 userId에 대해 openUserDetail 이 중복 호출될 때
+             * JS 브릿지가 window._openUserDetail_<userId>Resolve 를 덮어써서
+             * 먼저 등록된 Promise 가 10초 타임아웃되는 문제를 방지.
+             *
+             * URL 의 userIds 파라미터로 전달된 userId 목록에 대해
+             * Object.defineProperty setter/getter 를 주입해 모든 resolve 함수를
+             * 수집하고, native 가 resolve 할 때 수집된 함수 전부를 호출한다.
+             *
+             * 프론트엔드에서 cbId 중복 제거가 구현되면 이 코드는 제거해도 된다.
+             */
+            override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
+                super.onPageStarted(view, url, favicon)
+                if (url == null) return
+                try {
+                    val uri = android.net.Uri.parse(url)
+                    val userIdsParam = uri.getQueryParameter("userIds") ?: return
+                    val arr = org.json.JSONArray(userIdsParam)
+                    if (arr.length() == 0) return
+                    val keys = (0 until arr.length())
+                        .map { arr.getString(it) }
+                        .filter { it.isNotEmpty() }
+                        .joinToString(",") { id -> "\"_openUserDetail_${id}Resolve\"" }
+                    val patchJs = """
+                        (function() {
+                            [$keys].forEach(function(key) {
+                                var collected = [];
+                                Object.defineProperty(window, key, {
+                                    configurable: true,
+                                    enumerable: true,
+                                    set: function(fn) {
+                                        if (typeof fn === 'function') collected.push(fn);
+                                        else collected = [];
+                                    },
+                                    get: function() {
+                                        if (collected.length === 0) return undefined;
+                                        return function(data) {
+                                            var toCall = collected.splice(0);
+                                            try {
+                                                Object.defineProperty(window, key, {
+                                                    configurable: true, writable: true, value: undefined
+                                                });
+                                            } catch(e) {}
+                                            toCall.forEach(function(f) { try { f(data); } catch(e) {} });
+                                        };
+                                    }
+                                });
+                            });
+                        })();
+                    """.trimIndent()
+                    view?.evaluateJavascript(patchJs, null)
+                    Log.d(TAG, "SubWebView: injected multi-resolve patch for keys=[$keys]")
+                } catch (e: Exception) {
+                    Log.w(TAG, "SubWebView: multi-resolve patch injection failed: ${e.message}")
+                }
+            }
 
             override fun onPageFinished(view: WebView?, url: String?) {
                 super.onPageFinished(view, url)

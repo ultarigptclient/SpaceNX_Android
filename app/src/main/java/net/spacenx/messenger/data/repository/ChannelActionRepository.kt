@@ -145,7 +145,7 @@ class ChannelActionRepository(
                             additional = additional
                         )
                     ))
-                    chatDb.channelDao().updateLastChatSync(channelCode, sendDate, contents, masterUserId = sendUserId)
+                    chatDb.channelDao().updateLastChatSync(channelCode, sendDate, contents, lastSendUserId = sendUserId)
                     val eventId = resJson.optLong("eventId", 0L)
                     if (eventId > 0L) {
                         chatDb.syncMetaDao().insertSync(SyncMetaEntity(ChannelSyncRepository.CHAT_SYNC_META_KEY, eventId))

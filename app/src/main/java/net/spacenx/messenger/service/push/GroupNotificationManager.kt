@@ -12,6 +12,7 @@ import android.media.AudioAttributes
 import android.media.RingtoneManager
 import android.os.Build
 import android.os.Looper
+import android.text.Html
 import android.util.Log
 import android.util.LruCache
 import androidx.core.app.NotificationCompat
@@ -157,7 +158,7 @@ class NotificationGroupManager(
             else -> {
                 val notifyKey = arg ?: key
                 val notifyId = simpleKeyMap.getOrPut(notifyKey) { nextId.getAndIncrement() }
-                val notification = buildSimpleNotification(type, notifyKey, userName, message, arg)
+                val notification = buildSimpleNotification(type, notifyKey, userName, message, arg, senderId ?: "")
                     .build()
                 nm.notify(notifyId, notification)
                 showGroupSummary(nm)
@@ -246,20 +247,30 @@ class NotificationGroupManager(
         key: String,
         userName: String,
         message: String,
-        arg: String?
+        arg: String?,
+        senderId: String = ""
     ): NotificationCompat.Builder {
         val notifyId = simpleKeyMap[key] ?: nextId.get()
         val pendingIntent = createMainPendingIntent(type, key, arg, notifyId)
         val title = when (type) {
-            Constants.TYPE_MESSAGE       -> "쪽지"
+            Constants.TYPE_MESSAGE       -> userName.ifEmpty { "쪽지" }
             Constants.TYPE_SYSTEM_NOTIFY -> "알림"
             Constants.TYPE_MCU           -> message
             else -> userName.ifEmpty { "알림" }
         }
-        val body = if (type == Constants.TYPE_MCU) userName else message
+        val htmlDecoded = if (type == Constants.TYPE_MCU) userName
+                          else Html.fromHtml(message, Html.FROM_HTML_MODE_COMPACT).toString().trim()
+        val body = if (type == Constants.TYPE_MESSAGE) "쪽지\n$htmlDecoded" else htmlDecoded
+
+        // 쪽지: 발신자 프로필 사진 로딩 (백그라운드 스레드에서만)
+        val effectiveSenderId = senderId.takeIf { it.isNotEmpty() && it != "null" } ?: ""
+        val senderBitmap: Bitmap? = if (type == Constants.TYPE_MESSAGE && effectiveSenderId.isNotEmpty() && !isMainThread()) {
+            loadBitmap(effectiveSenderId)
+        } else null
 
         return NotificationCompat.Builder(context, CHANNEL_ID)
             .setSmallIcon(R.mipmap.ic_launcher)
+            .apply { if (senderBitmap != null) setLargeIcon(senderBitmap) }
             .setContentTitle(title)
             .setContentText(body)
             .setStyle(NotificationCompat.BigTextStyle().bigText(body))

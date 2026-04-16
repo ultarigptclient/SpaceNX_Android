@@ -11,6 +11,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.launch
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
 import net.spacenx.messenger.common.AppConfig
 import net.spacenx.messenger.common.Constants
 import net.spacenx.messenger.data.remote.api.ApiClient
@@ -117,9 +119,8 @@ class SocketSessionManager(
     var onAuthFailed: (() -> Unit)? = null
 
     // 재접속 상태
-    @Volatile
-    private var isReconnecting = false
-    private var reconnectDelaySec = 5
+    private val isReconnecting = AtomicBoolean(false)
+    @Volatile private var reconnectDelaySec = 5
     private var lastConnectionConfig: ConnectionConfig? = null
 
     // 로그인 시 사용한 자격증명
@@ -145,6 +146,7 @@ class SocketSessionManager(
         restLoginUserJson = null
         jwtTokenDeferred = CompletableDeferred()
         hiCompletedDeferred = CompletableDeferred()
+        isReconnecting.set(false)  // 진행 중인 재접속 플래그 초기화 (새 로그인으로 인한 상태 리셋)
         loginSessionScope?.cancel()
         loginSessionScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
@@ -296,11 +298,12 @@ class SocketSessionManager(
                     // 토큰 클리어 완료 → Idle 전환 (로그인 화면으로)
                     _loginState.tryEmit(LoginState.Idle)
                 } else {
-                    // 토큰 무관 HI 실패 (서버 오류 등) → deferred 즉시 실패 처리
+                    // 토큰 무관 HI 실패 (서버 오류 등) → deferred 즉시 실패 처리 + UI 알림
                     // hiCompletedDeferred.await() 대기 중인 코루틴이 무한 대기하지 않도록 exception으로 완료
                     if (!hiCompletedDeferred.isCompleted) {
                         hiCompletedDeferred.completeExceptionally(Exception("HI failed: $msg"))
                     }
+                    _loginState.tryEmit(LoginState.Failed("서버 오류: $msg"))
                 }
             }
         } catch (e: Exception) {
@@ -394,17 +397,18 @@ class SocketSessionManager(
      * HI 성공 → onReconnected (delta sync)
      */
     fun scheduleReconnect() {
-        if (isReconnecting || lastConnectionConfig == null) return
-        isReconnecting = true
+        if (!isReconnecting.compareAndSet(false, true)) return  // 이미 재접속 중이면 중복 진입 차단
+        if (lastConnectionConfig == null) { isReconnecting.set(false); return }
+        val scope = loginSessionScope ?: run { isReconnecting.set(false); return }  // 로그아웃/세션 종료 시 재접속 시도 안 함
         val delaySec = reconnectDelaySec
         // Jitter — 서버 재시작 시 thundering herd 방지 (0~2000ms 랜덤 추가)
         val jitterMs = (0..2000).random()
         val totalDelayMs = delaySec * 1000L + jitterMs
 
         Log.d(TAG, "scheduleReconnect in ${delaySec}s +${jitterMs}ms jitter...")
-        CoroutineScope(Dispatchers.IO).launch {
+        scope.launch {
             delay(totalDelayMs)
-            if (!isReconnecting) return@launch
+            if (!isReconnecting.get()) return@launch
 
             try {
                 Log.d(TAG, "Reconnecting...")
@@ -415,7 +419,7 @@ class SocketSessionManager(
                 binarySocketClient!!.connect()
             } catch (e: Exception) {
                 Log.e(TAG, "Reconnect failed: ${e.message}")
-                isReconnecting = false
+                isReconnecting.set(false)
                 reconnectDelaySec = (reconnectDelaySec * 2).coerceAtMost(60)
                 scheduleReconnect()
             }
@@ -427,7 +431,8 @@ class SocketSessionManager(
      */
     private fun handleReconnectAuthFailed() {
         Log.d(TAG, "Reconnect auth failed — trying REST token refresh")
-        CoroutineScope(Dispatchers.IO).launch {
+        val scope = loginSessionScope ?: run { onAuthFailed?.invoke(); return }
+        scope.launch {
             try {
                 val rt = refreshToken ?: appConfig.getSavedRefreshToken()
                 if (rt.isNullOrEmpty()) {
@@ -450,7 +455,7 @@ class SocketSessionManager(
                 if (newAccess.isNotEmpty()) {
                     updateTokens(newAccess, newRefresh)
                     Log.d(TAG, "REST token refresh OK — reconnecting bridge")
-                    isReconnecting = false
+                    isReconnecting.set(false)
                     reconnectDelaySec = 5
                     scheduleReconnect()
                 } else {
@@ -489,7 +494,7 @@ class SocketSessionManager(
                             if (!jwtTokenDeferred.isCompleted) jwtTokenDeferred.complete(jwtToken)
                             if (!hiCompletedDeferred.isCompleted) hiCompletedDeferred.complete(Unit)
 
-                            isReconnecting = false
+                            isReconnecting.set(false)
                             reconnectDelaySec = 5
                             Log.d(TAG, "Reconnect HI OK → triggering delta sync")
                             hiCompletedListeners.forEach { it() }
@@ -517,7 +522,7 @@ class SocketSessionManager(
         override fun onDisconnected() {
             Log.d(TAG, "Reconnect socket disconnected")
             binarySocketClient = null
-            isReconnecting = false
+            isReconnecting.set(false)
             _loginState.tryEmit(LoginState.Disconnected)
             // 재접속 스케줄 (exponential backoff)
             reconnectDelaySec = (reconnectDelaySec * 2).coerceAtMost(60)
@@ -526,20 +531,19 @@ class SocketSessionManager(
 
         override fun onError(error: Throwable) {
             Log.e(TAG, "Reconnect socket error: ${error.message}")
-            isReconnecting = false
+            isReconnecting.set(false)
             reconnectDelaySec = (reconnectDelaySec * 2).coerceAtMost(60)
             scheduleReconnect()
         }
     }
 
     fun cancelReconnect() {
-        isReconnecting = false
+        isReconnecting.set(false)
     }
 
     // ── neoSend: 바이너리 소켓으로 프레임 전송 + 응답 대기 ──
 
-    private var nextInvokeId = 1
-    private val pendingRequests = mutableMapOf<Int, CompletableDeferred<JSONObject>>()
+    private val pendingRequests = ConcurrentHashMap<Int, CompletableDeferred<JSONObject>>()
 
     /**
      * NHM-68: WS 기반 neoSend — command name으로 프레임 전송, invokeId로 응답 매칭

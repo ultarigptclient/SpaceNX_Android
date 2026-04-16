@@ -142,14 +142,14 @@ class PushEventHandler(
             }
             if (synced != null && sendDate >= synced.lastChatDate) {
                 chatDb.channelDao().insert(
-                    synced.copy(lastChatDate = sendDate, lastChatContents = contents, masterUserId = sendUserId)
+                    synced.copy(lastChatDate = sendDate, lastChatContents = contents, lastSendUserId = sendUserId)
                 )
             }
         } else {
             chatDb.channelDao().updateLastChatDate(channelCode, sendDate)
             if (sendDate >= channel.lastChatDate) {
                 chatDb.channelDao().insert(
-                    channel.copy(lastChatDate = sendDate, lastChatContents = contents, masterUserId = sendUserId)
+                    channel.copy(lastChatDate = sendDate, lastChatContents = contents, lastSendUserId = sendUserId)
                 )
             }
         }
@@ -604,6 +604,20 @@ class PushEventHandler(
         // ADD_COMMENT / DELETE_COMMENT: 로컬 chat_thread.commentCount 갱신
         // (서버는 0x28C ModThreadEvent 또는 0x299/0x29A 로 보낼 수 있음 — eventType 기준으로 판단)
         val eventType = data.optString("eventType", "")
+
+        if (eventType == "DELETE_ISSUE") {
+            val issueCode = data.optString("issueCode", "")
+            if (issueCode.isNotEmpty()) {
+                try {
+                    dbProvider.getProjectDatabase().issueDao().delete(issueCode)
+                    Log.d(TAG, "handleProjectEvent: DELETE_ISSUE → issueCode=$issueCode 삭제")
+                } catch (e: Exception) {
+                    Log.e(TAG, "handleProjectEvent DELETE_ISSUE error: ${e.message}", e)
+                }
+            }
+            return
+        }
+
         if (eventType == "ADD_COMMENT" || eventType == "DELETE_COMMENT") {
             val threadCode = data.optString("threadCode", "")
             if (threadCode.isEmpty() || !data.has("commentCount")) return

@@ -203,7 +203,7 @@ class DatabaseProvider(private val context: Context) {
         val db = Room.databaseBuilder(context, ChatDatabase::class.java, dbFile.absolutePath)
             .openHelperFactory(openHelperFactory)
             .setJournalMode(RoomDatabase.JournalMode.TRUNCATE)
-            .addMigrations(ChatDatabase.MIGRATION_1_2, ChatDatabase.MIGRATION_2_3)
+            .addMigrations(ChatDatabase.MIGRATION_1_2, ChatDatabase.MIGRATION_2_3, ChatDatabase.MIGRATION_3_4)
             .build()
         chatDb = db
         return db

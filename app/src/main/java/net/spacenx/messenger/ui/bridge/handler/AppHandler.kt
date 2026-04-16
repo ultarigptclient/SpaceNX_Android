@@ -5,9 +5,11 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import net.spacenx.messenger.data.remote.api.ApiClient
+import net.spacenx.messenger.data.remote.socket.codec.ProtocolCommand
 import net.spacenx.messenger.data.repository.ChannelRepository
 import net.spacenx.messenger.data.repository.PubSubRepository
 import net.spacenx.messenger.ui.bridge.BridgeContext
+import net.spacenx.messenger.ui.bridge.BridgeDispatcher
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -304,6 +306,193 @@ class AppHandler(
             ctx.resolveToJs("dbQuery", result.put("errorCode", 0))
         } catch (e: Exception) {
             ctx.rejectToJs("dbQuery", e.message)
+        }
+    }
+
+    suspend fun handleChangeStatus(params: Map<String, Any?>) {
+        val statusCode = ctx.paramStr(params, "statusCode").toIntOrNull() ?: 0
+        Log.d("Presence", "[1] changeStatus: userId=${ctx.appConfig.getSavedUserId()}, statusCode=$statusCode, restPriority=${BridgeDispatcher.PRESENCE_REST_PRIORITY}")
+
+        suspend fun tryRest(): Boolean {
+            return try {
+                val body = ctx.paramsToJson(params)
+                val token = ctx.appConfig.getSavedToken()
+                val result = withContext(Dispatchers.IO) {
+                    ApiClient.postJson(ctx.appConfig.getEndpointByPath("/status/setpresence"), body, token)
+                }
+                if (result.optInt("errorCode", 0) != 0) {
+                    Log.w("Presence", "[1] changeStatus REST rejected: errorCode=${result.optInt("errorCode", 0)}")
+                    return false
+                }
+                ctx.resolveToJs("changeStatus", result)
+                Log.d("Presence", "[1] changeStatus via REST: statusCode=$statusCode")
+                true
+            } catch (e: Exception) {
+                Log.w("Presence", "[1] changeStatus REST failed: ${e.message}")
+                false
+            }
+        }
+
+        fun trySocket(): Boolean {
+            val sm = ctx.loginViewModel.sessionManager
+            return if (sm.hiCompletedDeferred.isCompleted && sm.loginSessionScope != null) {
+                val body = JSONObject().put("presence", statusCode).toString().toByteArray(Charsets.UTF_8)
+                sm.sendFrame(ProtocolCommand.SET_PRESENCE.code, body)
+                ctx.resolveToJs("changeStatus", JSONObject().put("errorCode", 0))
+                Log.d("Presence", "[1] changeStatus via socket: presence=$statusCode")
+                true
+            } else {
+                Log.w("Presence", "[1] changeStatus socket not ready")
+                false
+            }
+        }
+
+        val success = if (BridgeDispatcher.PRESENCE_REST_PRIORITY) tryRest() || trySocket()
+                      else trySocket() || tryRest()
+
+        if (success) {
+            ctx.appConfig.saveMyStatusCode(statusCode)
+            val userId = ctx.appConfig.getSavedUserId() ?: ""
+            if (userId.isNotEmpty()) {
+                val presenceJson = """{"users":[{"userId":"$userId","icon":$statusCode}]}"""
+                Log.d("Presence", "[2] self→React: $presenceJson")
+                ctx.evalJs("window._onPresenceUpdate && window._onPresenceUpdate('${ctx.esc(presenceJson)}')")
+            }
+        } else {
+            ctx.rejectToJs("changeStatus", "both REST and socket failed")
+        }
+    }
+
+    suspend fun handleSetNick(params: Map<String, Any?>) {
+        val nick = ctx.paramStr(params, "nick")
+        try {
+            val body = ctx.paramsToJson(params)
+            val token = ctx.appConfig.getSavedToken()
+            val result = withContext(Dispatchers.IO) {
+                ApiClient.postJson(ctx.appConfig.getEndpointByPath("/nick/setnick"), body, token)
+            }
+            ctx.resolveToJs("setNick", result)
+            if (nick.isNotEmpty()) ctx.appConfig.saveMyNick(nick)
+            val userId = ctx.appConfig.getSavedUserId() ?: ""
+            if (nick.isNotEmpty() && userId.isNotEmpty()) {
+                val nickJson = """{"users":[{"userId":"$userId","command":"Nick","nick":"${ctx.esc(nick)}"}]}"""
+                Log.d(TAG, "setNick self→React: $nickJson")
+                ctx.evalJs("window._onPresenceUpdate && window._onPresenceUpdate('${ctx.esc(nickJson)}')")
+            }
+        } catch (e: Exception) {
+            ctx.rejectToJs("setNick", e.message)
+        }
+    }
+
+    suspend fun handleUploadProfilePhoto(params: Map<String, Any?>) {
+        Log.d(TAG, "uploadProfilePhoto params: $params")
+        try {
+            val fileObj = params["file"]
+            val fileUrl = when (fileObj) {
+                is JSONObject -> fileObj.optString("url", "")
+                is Map<*, *> -> fileObj["url"]?.toString() ?: ""
+                is String -> try { JSONObject(fileObj).optString("url", "") } catch (_: Exception) { "" }
+                else -> ""
+            }
+            val userId = ctx.appConfig.getSavedUserId() ?: ""
+            if (fileUrl.isEmpty() || userId.isEmpty()) {
+                ctx.rejectToJs("uploadProfilePhoto", "Missing fileUrl or userId")
+                return
+            }
+            val token = ctx.appConfig.getSavedToken()
+            val result = withContext(Dispatchers.IO) {
+                val origin = ctx.appConfig.getRestBaseUrl().replace(Regex("/api$"), "")
+                val fullUrl = if (fileUrl.startsWith("http")) fileUrl else "$origin$fileUrl"
+                Log.d(TAG, "uploadProfilePhoto: downloading from $fullUrl")
+                val imageBytes = ApiClient.downloadBytes(fullUrl, token)
+                Log.d(TAG, "uploadProfilePhoto: downloaded ${imageBytes.size} bytes, uploading")
+                val photoUploadUrl = ctx.appConfig.getEndpointByPath("/media/photo/upload")
+                ApiClient.uploadProfilePhoto(photoUploadUrl, imageBytes, userId, token)
+            }
+            Log.d(TAG, "uploadProfilePhoto response: $result")
+            try {
+                val photoUrl = result.optString("photoUrl", "")
+                val photoVersion = result.optLong("photoVersion", 0L)
+                if (photoUrl.isNotEmpty() && photoVersion > 0) {
+                    val cacheBustedUrl = "$photoUrl?v=$photoVersion"
+                    result.put("photoUrl", cacheBustedUrl)
+                    ctx.appConfig.saveMyPhotoVersion(photoVersion)
+                }
+            } catch (_: Exception) {}
+            ctx.resolveToJs("uploadProfilePhoto", result)
+            try {
+                val photoUrl = result.optString("photoUrl", "")
+                val photoVersion = result.optLong("photoVersion", 0L)
+                if (photoUrl.isNotEmpty() && userId.isNotEmpty()) {
+                    val photoJson = """{"users":[{"userId":"$userId","command":"Photo","photoUrl":"${ctx.esc(photoUrl)}","photoVersion":$photoVersion}]}"""
+                    Log.d(TAG, "uploadProfilePhoto self→React: $photoJson")
+                    ctx.evalJs("window._onPresenceUpdate && window._onPresenceUpdate('${ctx.esc(photoJson)}')")
+                }
+            } catch (_: Exception) {}
+        } catch (e: Exception) {
+            Log.e(TAG, "uploadProfilePhoto error: ${e.message}", e)
+            ctx.rejectToJs("uploadProfilePhoto", e.message)
+        }
+    }
+
+    suspend fun handleSyncConfig(params: Map<String, Any?>) {
+        try {
+            val userId = ctx.appConfig.getSavedUserId() ?: ctx.paramStr(params, "userId")
+            val lastSyncTime = ctx.paramLong(params, "lastSyncTime") ?: 0L
+            val body = JSONObject().put("userId", userId).put("lastSyncTime", lastSyncTime)
+            val token = ctx.appConfig.getSavedToken()
+            val result = withContext(Dispatchers.IO) {
+                ApiClient.postJson(ctx.appConfig.getEndpointByPath("/auth/syncconfig"), body, token)
+            }
+            // configs 캐시 업데이트
+            val configs = result.optJSONObject("configs")
+            if (configs != null && configs.length() > 0) {
+                val configMap = mutableMapOf<String, String>()
+                val keys = configs.keys()
+                while (keys.hasNext()) {
+                    val key = keys.next()
+                    configMap[key] = configs.optString(key, "")
+                }
+                ctx.appConfig.updateConfigCache(configMap)
+                // FRONTEND_VERSION / FRONTEND_SKIN 변경 시 SPA 재로딩
+                val fv = configMap["FRONTEND_VERSION"]
+                val fs = configMap["FRONTEND_SKIN"]
+                if (!fv.isNullOrEmpty() || !fs.isNullOrEmpty()) {
+                    ctx.activity.reloadSpa()
+                    Log.d(TAG, "syncConfig: SPA reload triggered (FRONTEND_VERSION=$fv FRONTEND_SKIN=$fs)")
+                }
+            }
+            // 서버가 새 JWT 발급한 경우 갱신
+            val newToken = result.optString("accessToken", "")
+            if (newToken.isNotEmpty()) {
+                ctx.loginViewModel.sessionManager.jwtToken = newToken
+                Log.d(TAG, "syncConfig: JWT token updated")
+            }
+            ctx.resolveToJs("syncConfig", result)
+        } catch (e: Exception) {
+            ctx.rejectToJs("syncConfig", e.message)
+        }
+    }
+
+    suspend fun handleSendMessageToRoomMembers(params: Map<String, Any?>) {
+        val channelCode = ctx.paramStr(params, "channelCode")
+        val myUserId = ctx.appConfig.getSavedUserId() ?: ""
+        try {
+            val members = withContext(Dispatchers.IO) {
+                if (channelCode.isEmpty()) emptyList()
+                else ctx.dbProvider.getChatDatabase().channelMemberDao()
+                    .getActiveMembersByChannel(channelCode)
+                    .map { it.userId }
+                    .filter { it != myUserId }
+            }
+            if (members.isEmpty()) {
+                ctx.rejectToJs("sendMessageToRoomMembers", "no members in channel $channelCode")
+                return
+            }
+            Log.d(TAG, "sendMessageToRoomMembers: channelCode=$channelCode, ${members.size} recipients")
+            handleOpenNoteSendWindow(mapOf("userIds" to members))
+        } catch (e: Exception) {
+            ctx.rejectToJs("sendMessageToRoomMembers", e.message)
         }
     }
 

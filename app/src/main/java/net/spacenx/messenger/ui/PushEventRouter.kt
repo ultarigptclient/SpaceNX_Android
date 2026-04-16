@@ -187,7 +187,8 @@ class PushEventRouter(
                                     showPushNotificationGeneric(
                                         Constants.TYPE_MESSAGE, "MSG",
                                         data.optString("sendUserName", sid),
-                                        data.optString("title", data.optString("contents", ""))
+                                        data.optString("title", data.optString("contents", "")),
+                                        sid
                                     )
                                 }
                             }
@@ -265,7 +266,7 @@ class PushEventRouter(
         }
     }
 
-    fun showPushNotificationGeneric(type: String, key: String, senderName: String, contents: String) {
+    fun showPushNotificationGeneric(type: String, key: String, senderName: String, contents: String, senderId: String = "") {
         if (isAppInForeground()) {
             activity.runOnUiThread {
                 val title = when (type) {
@@ -283,7 +284,7 @@ class PushEventRouter(
                 }
             }
         } else {
-            notificationGroupManager.showNotify(type, key, senderName, preprocessContent(contents), null)
+            notificationGroupManager.showNotify(type, key, senderName, preprocessContent(contents), null, null, senderId)
         }
     }
 }

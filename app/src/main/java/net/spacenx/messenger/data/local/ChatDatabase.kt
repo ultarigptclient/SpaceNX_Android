@@ -26,7 +26,7 @@ import net.spacenx.messenger.data.local.entity.SyncMetaEntity
         ChatEventEntity::class,
         SyncMetaEntity::class
     ],
-    version = 3,
+    version = 4,
     exportSchema = true
 )
 abstract class ChatDatabase : RoomDatabase() {
@@ -52,6 +52,15 @@ abstract class ChatDatabase : RoomDatabase() {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL(
                     "ALTER TABLE channels ADD COLUMN state INTEGER NOT NULL DEFAULT 0"
+                )
+            }
+        }
+
+        /** v3→v4: channels 테이블에 lastSendUserId 추가 (masterUserId 오용 → 명확한 컬럼 분리) */
+        val MIGRATION_3_4 = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "ALTER TABLE channels ADD COLUMN lastSendUserId TEXT NOT NULL DEFAULT ''"
                 )
             }
         }

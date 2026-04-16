@@ -30,6 +30,8 @@ class OrgHandler(
             "syncBuddy" -> handleSyncBuddy()
             "addUserToMyList" -> handleAddUserToMyList(params)
             "getMyPart" -> handleGetMyPart(params)
+            "addBuddy" -> handleAddBuddy(params)
+            "removeBuddy" -> handleRemoveBuddy(params)
         }
     }
 
@@ -82,13 +84,28 @@ class OrgHandler(
     }
 
     /**
-     * openUserDetail — userId별 resolver(__oudResolve) 사용.
-     * React가 동시에 20번 호출해도 각각 올바른 resolver로 응답.
-     * shim이 없는 경우 기존 resolveToJs fallback.
+     * openUserDetail — JS가 nativeSend 호출 시 callbackId='openUserDetail_<userId>'로
+     * 등록하므로, _callbackId 파라미터를 읽어 resolveToJs(cbId, data)로 응답한다.
      */
+    /**
+     * openUserDetail resolve 시 BRIDGE_SHIM_JS 의 __oudResolve 큐를 우선 사용.
+     * shim 이 pm[cbId] 에 수집해 둔 모든 resolve fn 을 한 번에 호출한다.
+     * shim 미설치(페이지 로드 전 등) 시에는 기존 window._cbIdResolve 직접 호출로 폴백.
+     */
+    private fun resolveUserDetail(cbId: String, data: JSONObject) {
+        val d = ctx.esc(data.toString())
+        val cb = ctx.esc(cbId)
+        ctx.evalJs(
+            "(function(){var d='$d';" +
+            "if(window.__oudResolve&&window.__oudResolve('$cb',d))return;" +
+            "window._${cbId}Resolve&&window._${cbId}Resolve(d);})()"
+        )
+    }
+
     private suspend fun handleOpenUserDetail(params: Map<String, Any?>) {
         val userId = ctx.paramStr(params, "userId")
-        Log.d(TAG, "openUserDetail: userId=$userId, allParamKeys=${params.keys}")
+        val cbId = ctx.paramStr(params, "_callbackId").ifEmpty { "openUserDetail" }
+        Log.d(TAG, "openUserDetail: userId=$userId, cbId=$cbId")
         try {
             val orgDb = ctx.dbProvider.getOrgDatabase()
             val user = withContext(Dispatchers.IO) { orgDb.userDao().getByUserId(userId) }
@@ -97,40 +114,30 @@ class OrgHandler(
                 info.put("userId", userId)
                 info.put("deptId", user.deptId)
                 info.put("errorCode", 0)
-                resolveUserDetail(userId, info)
+                resolveUserDetail(cbId, info)
                 return
             }
             val buddy = withContext(Dispatchers.IO) { orgDb.buddyDao().getByUserId(userId) }
             if (buddy != null && buddy.buddyName.isNotEmpty()) {
                 Log.d(TAG, "openUserDetail: userId=$userId found in buddies, name=${buddy.buddyName}")
-                resolveUserDetail(userId, JSONObject()
+                resolveUserDetail(cbId, JSONObject()
                     .put("userId", userId)
                     .put("userName", buddy.buddyName)
                     .put("errorCode", 0))
                 return
             }
             Log.w(TAG, "openUserDetail: userId=$userId not in local DB, resolving with userId as fallback")
-            resolveUserDetail(userId, JSONObject()
+            resolveUserDetail(cbId, JSONObject()
                 .put("userId", userId)
                 .put("userName", userId)
                 .put("errorCode", 0))
         } catch (e: Exception) {
-            Log.w(TAG, "openUserDetail: exception for userId=$userId: ${e.message}, resolving with fallback")
-            resolveUserDetail(userId, JSONObject()
+            Log.w(TAG, "openUserDetail: exception for userId=$userId: ${e.message}")
+            resolveUserDetail(cbId, JSONObject()
                 .put("userId", userId)
                 .put("userName", userId)
                 .put("errorCode", 0))
         }
-    }
-
-    /** __oudResolve(userId별 큐) 우선, 없으면 기존 resolveToJs fallback */
-    private fun resolveUserDetail(userId: String, data: JSONObject) {
-        val escaped = ctx.esc(data.toString())
-        val escapedUid = ctx.esc(userId)
-        ctx.evalJsMain(
-            "if(window.__oudResolve){window.__oudResolve('$escapedUid','$escaped')}" +
-            "else if(window._openUserDetailResolve){window._openUserDetailResolve('$escaped')}"
-        )
     }
 
     private suspend fun handleSyncBuddy() {
@@ -231,6 +238,50 @@ class OrgHandler(
             ctx.resolveToJs("addUserToMyList", result)
         } catch (e: Exception) {
             ctx.rejectToJs("addUserToMyList", e.message)
+        }
+    }
+
+    private suspend fun handleAddBuddy(params: Map<String, Any?>) {
+        try {
+            val myUserId = ctx.appConfig.getSavedUserId() ?: ""
+            val targetUserId = ctx.paramStr(params, "userId")
+            val result = withContext(Dispatchers.IO) {
+                val token = ctx.loginViewModel.sessionManager.jwtToken
+                ApiClient.postJson(
+                    ctx.appConfig.getEndpointByPath("/buddy/addlink"),
+                    JSONObject().put("userIds", JSONArray().put(targetUserId)).put("groupId", "0"),
+                    token
+                )
+            }
+            if (result.optInt("errorCode", -1) == 0) {
+                withContext(Dispatchers.IO) { buddyRepo.syncBuddy(myUserId) }
+            }
+            ctx.resolveToJs("addBuddy", result)
+        } catch (e: Exception) {
+            ctx.rejectToJs("addBuddy", e.message)
+        }
+    }
+
+    private suspend fun handleRemoveBuddy(params: Map<String, Any?>) {
+        try {
+            val myUserId = ctx.appConfig.getSavedUserId() ?: ""
+            val targetUserId = ctx.paramStr(params, "userId")
+            val result = withContext(Dispatchers.IO) {
+                val token = ctx.loginViewModel.sessionManager.jwtToken
+                ApiClient.postJson(
+                    ctx.appConfig.getEndpointByPath("/buddy/buddydel"),
+                    JSONObject().put("userId", myUserId)
+                        .put("buddyId", targetUserId)
+                        .put("buddyParent", "0"),
+                    token
+                )
+            }
+            if (result.optInt("errorCode", -1) == 0) {
+                withContext(Dispatchers.IO) { buddyRepo.syncBuddy(myUserId) }
+            }
+            ctx.resolveToJs("removeBuddy", result)
+        } catch (e: Exception) {
+            ctx.rejectToJs("removeBuddy", e.message)
         }
     }
 }

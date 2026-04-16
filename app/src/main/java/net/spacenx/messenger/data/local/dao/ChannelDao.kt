@@ -48,8 +48,8 @@ interface ChannelDao {
     @Query("DELETE FROM channels")
     fun deleteAllSync()
 
-    @Query("UPDATE channels SET lastChatDate = :date, lastChatContents = :contents, masterUserId = :masterUserId WHERE channelCode = :channelCode")
-    fun updateLastChatSync(channelCode: String, date: Long, contents: String, masterUserId: String)
+    @Query("UPDATE channels SET lastChatDate = :date, lastChatContents = :contents, lastSendUserId = :lastSendUserId WHERE channelCode = :channelCode")
+    fun updateLastChatSync(channelCode: String, date: Long, contents: String, lastSendUserId: String)
 
     @Query("SELECT * FROM channels")
     fun getAllSync(): List<ChannelEntity>

@@ -301,8 +301,8 @@ class AuthRepository(
                 Log.d(TAG, "REST login success - tokens saved")
             }
 
-            // 자격증명 저장
-            appConfig.saveCredentials(username, password)
+            // userId만 저장 (password는 refreshToken으로 재인증하므로 저장하지 않음)
+            appConfig.saveCredentials(username, "")
 
             val userId = json.optString("userId", username)
             Constants.myId = userId
@@ -493,24 +493,26 @@ class AuthRepository(
         val userId = sessionManager.pendingUserId ?: appConfig.getSavedUserId() ?: ""
         Log.d(TAG, "logout() called for user: $userId")
         CoroutineScope(Dispatchers.IO).launch {
-            // REST logout (서버에서 refreshToken 폐기)
-            val restSuccess = restLogout(userId)
-            if (!restSuccess) {
-                Log.w(TAG, "REST logout failed, clearing local tokens anyway")
+            try {
+                // REST logout (서버에서 refreshToken 폐기)
+                val restSuccess = restLogout(userId)
+                if (!restSuccess) {
+                    Log.w(TAG, "REST logout failed, clearing local tokens anyway")
+                }
+            } finally {
+                // REST 성공/실패·예외 무관하게 로컬 토큰 + 자격증명 반드시 삭제
+                appConfig.clearTokens()
+                appConfig.clearCredentials()
+                appConfig.clearMyDeptId()
+                appConfig.clearFrontendCache()
+                Constants.myId = ""
+                sessionManager.jwtToken = null
+                sessionManager.refreshToken = null
+                Log.d(TAG, "Logout: local tokens and credentials cleared")
+
+                sessionManager.emitLoginStateSuspend(LoginState.Idle)
+                sessionManager.disconnect()
             }
-
-            // REST 성공/실패 무관하게 로컬 토큰 + 자격증명 삭제
-            appConfig.clearTokens()
-            appConfig.clearCredentials()
-            appConfig.clearMyDeptId()
-            appConfig.clearFrontendCache()
-            Constants.myId = ""
-            sessionManager.jwtToken = null
-            sessionManager.refreshToken = null
-            Log.d(TAG, "Logout: local tokens and credentials cleared")
-
-            sessionManager.emitLoginStateSuspend(LoginState.Idle)
-            sessionManager.disconnect()
         }
     }
 

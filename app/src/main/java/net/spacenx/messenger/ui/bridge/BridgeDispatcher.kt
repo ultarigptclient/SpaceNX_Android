@@ -79,8 +79,8 @@ class BridgeDispatcher(
 
     override val scope: CoroutineScope get() = activity.lifecycleScope
 
-    // NHM-61: sync 완료 이벤트 보관 (React 마운트 전 완료 대비)
-    override val completedSyncs = mutableSetOf<String>()
+    // NHM-61: sync 완료 이벤트 보관 (React 마운트 전 완료 대비) — 멀티스레드 안전
+    override val completedSyncs: MutableSet<String> = java.util.Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap())
 
     /** NHM-70: 현재 열려 있는 채널 코드 (인앱 알림 억제용). 프로세스 전역 AppState에도 미러링. */
     @Volatile
@@ -154,9 +154,10 @@ class BridgeDispatcher(
                 // 프론트엔드 setCredential() 은 'SetCredential' (대문자 S) 로 전송. legacy saveCredential alias 는 제거됨.
                 "SetCredential" -> scope.launch { appHandler.handleSaveCredential(params) }
 
-                // ── 조직도 + 내목록 ──
+                // ── 조직도 + 내목록 + 버디 관리 ──
                 "getOrgList", "getOrgSubList", "searchUsers", "openUserDetail",
-                "syncBuddy", "addUserToMyList", "getMyPart"
+                "syncBuddy", "addUserToMyList", "getMyPart",
+                "addBuddy", "removeBuddy"
                     -> scope.launch { orgHandler.handle(action, params) }
 
                 // ── 채널 관리 ──
@@ -164,7 +165,8 @@ class BridgeDispatcher(
                 "createChatRoom", "createGroupChatRoom", "openChannel",
                 "addChannelMember", "removeChannelMember",
                 "addChannelFavorite", "removeChannelFavorite", "createConference",
-                "removeChannel", "findChannelByMembers", "getChannel"
+                "removeChannel", "findChannelByMembers", "getChannel",
+                "deleteRoom", "openChatRoom"
                     -> scope.launch { channelActionHandler.handle(action, params) }
 
                 // ── 채팅 메시지 ──
@@ -194,147 +196,21 @@ class BridgeDispatcher(
                     -> scope.launch { fileHandler.handle(action, params) }
 
                 // ── 상태/프로필 ──
-                "changeStatus" -> scope.launch {
-                    val statusCode = paramStr(params, "statusCode").toIntOrNull() ?: 0
-                    Log.d("Presence", "[1] changeStatus: userId=${appConfig.getSavedUserId()}, statusCode=$statusCode, restPriority=$PRESENCE_REST_PRIORITY")
-
-                    suspend fun tryRest(): Boolean {
-                        return try {
-                            val body = paramsToJson(params)
-                            val token = appConfig.getSavedToken()
-                            val result = withContext(Dispatchers.IO) {
-                                ApiClient.postJson(appConfig.getEndpointByPath("/status/setpresence"), body, token)
-                            }
-                            // 서버가 errorCode 없이 성공 응답하는 경우를 위해 default=0 (성공 가정)
-                            if (result.optInt("errorCode", 0) != 0) {
-                                Log.w("Presence", "[1] changeStatus REST rejected: errorCode=${result.optInt("errorCode", 0)}")
-                                return false
-                            }
-                            resolveToJs("changeStatus", result)
-                            Log.d("Presence", "[1] changeStatus via REST: statusCode=$statusCode")
-                            true
-                        } catch (e: Exception) {
-                            Log.w("Presence", "[1] changeStatus REST failed: ${e.message}")
-                            false
-                        }
-                    }
-
-                    fun trySocket(): Boolean {
-                        val sm = loginViewModel.sessionManager
-                        return if (sm.hiCompletedDeferred.isCompleted && sm.loginSessionScope != null) {
-                            val body = JSONObject().put("presence", statusCode).toString().toByteArray(Charsets.UTF_8)
-                            sm.sendFrame(net.spacenx.messenger.data.remote.socket.codec.ProtocolCommand.SET_PRESENCE.code, body)
-                            resolveToJs("changeStatus", JSONObject().put("errorCode", 0))
-                            Log.d("Presence", "[1] changeStatus via socket: presence=$statusCode")
-                            true
-                        } else {
-                            Log.w("Presence", "[1] changeStatus socket not ready")
-                            false
-                        }
-                    }
-
-                    val success = if (PRESENCE_REST_PRIORITY) {
-                        tryRest() || trySocket()
-                    } else {
-                        trySocket() || tryRest()
-                    }
-                    if (success) {
-                        // 본인 상태 저장 (앱 재시작 후에도 유지) — 성공 시에만 저장
-                        appConfig.saveMyStatusCode(statusCode)
-                        // 본인 상태 즉시 반영 — 서버는 본인 자신에게 ICON_EVENT를 보내지 않으므로 직접 호출
-                        val userId = appConfig.getSavedUserId() ?: ""
-                        if (userId.isNotEmpty()) {
-                            val presenceJson = """{"users":[{"userId":"$userId","icon":$statusCode}]}"""
-                            Log.d("Presence", "[2] self→React: $presenceJson")
-                            evalJs("window._onPresenceUpdate && window._onPresenceUpdate('${esc(presenceJson)}')")
-                        }
-                    } else {
-                        rejectToJs("changeStatus", "both REST and socket failed")
-                    }
-                }
+                "changeStatus" -> scope.launch { appHandler.handleChangeStatus(params) }
                 "changeStatusMessage" -> scope.launch { handleRestForward("changeStatusMessage", "/status/setpresence", params) }
-                "setNick" -> scope.launch {
-                    val nick = paramStr(params, "nick")
-                    try {
-                        val body = paramsToJson(params)
-                        val token = appConfig.getSavedToken()
-                        val result = withContext(Dispatchers.IO) {
-                            ApiClient.postJson(appConfig.getEndpointByPath("/nick/setnick"), body, token)
-                        }
-                        resolveToJs("setNick", result)
-                        // 서버는 본인에게 NICK PUBLISH를 보내지 않으므로 직접 반영
-                        if (nick.isNotEmpty()) appConfig.saveMyNick(nick)
-                        val userId = appConfig.getSavedUserId() ?: ""
-                        if (nick.isNotEmpty() && userId.isNotEmpty()) {
-                            val nickJson = """{"users":[{"userId":"$userId","command":"Nick","nick":"${esc(nick)}"}]}"""
-                            Log.d(TAG, "setNick self→React: $nickJson")
-                            evalJs("window._onPresenceUpdate && window._onPresenceUpdate('${esc(nickJson)}')")
-                        }
-                    } catch (e: Exception) {
-                        rejectToJs("setNick", e.message)
-                    }
-                }
+                "setNick" -> scope.launch { appHandler.handleSetNick(params) }
                 "updateProfile" -> scope.launch { handleRestForward("updateProfile", "/org/updateprofile", params) }
-                "uploadProfilePhoto" -> activity.lifecycleScope.launch {
-                    Log.d(TAG, "uploadProfilePhoto params: $params")
-                    try {
-                        val fileObj = params["file"]
-                        val fileUrl = when (fileObj) {
-                            is JSONObject -> fileObj.optString("url", "")
-                            is Map<*, *> -> fileObj["url"]?.toString() ?: ""
-                            is String -> try { JSONObject(fileObj).optString("url", "") } catch (_: Exception) { "" }
-                            else -> ""
-                        }
-                        val userId = appConfig.getSavedUserId() ?: ""
-                        if (fileUrl.isEmpty() || userId.isEmpty()) {
-                            rejectToJs("uploadProfilePhoto", "Missing fileUrl or userId")
-                            return@launch
-                        }
-                        // pickFile로 업로드된 파일을 서버에서 다운로드 → /api/media/photo/upload로 multipart 재전송
-                        val token = appConfig.getSavedToken()
-                        val result = withContext(kotlinx.coroutines.Dispatchers.IO) {
-                            val origin = appConfig.getRestBaseUrl().replace(Regex("/api$"), "")
-                            val fullUrl = if (fileUrl.startsWith("http")) fileUrl else "$origin$fileUrl"
-                            Log.d(TAG, "uploadProfilePhoto: downloading from $fullUrl")
-                            val imageBytes = ApiClient.downloadBytes(fullUrl, token)
-                            Log.d(TAG, "uploadProfilePhoto: downloaded ${imageBytes.size} bytes, uploading to photo/upload")
-                            val photoUploadUrl = appConfig.getEndpointByPath("/media/photo/upload")
-                            ApiClient.uploadProfilePhoto(photoUploadUrl, imageBytes, userId, token)
-                        }
-                        Log.d(TAG, "uploadProfilePhoto response: $result")
-                        // 서버는 본인에게 PHOTO PUBLISH를 보내지 않으므로 직접 반영
-                        try {
-                            val photoUrl = result.optString("photoUrl", "")
-                            val photoVersion = result.optLong("photoVersion", 0L)
-                            if (photoUrl.isNotEmpty() && photoVersion > 0) {
-                                // photoVersion을 쿼리 파라미터로 붙여 브라우저 이미지 캐시 무효화
-                                val cacheBustedUrl = "$photoUrl?v=$photoVersion"
-                                // resolveToJs에도 버전 URL 포함 (React promise 핸들러에서 캐시 없이 로드)
-                                result.put("photoUrl", cacheBustedUrl)
-                                // 앱 재시작 후 복원을 위해 로컬 저장
-                                appConfig.saveMyPhotoVersion(photoVersion)
-                            }
-                        } catch (_: Exception) {}
-                        resolveToJs("uploadProfilePhoto", result)
-                        // _onPresenceUpdate로도 동일한 URL 전달
-                        try {
-                            val photoUrl = result.optString("photoUrl", "")
-                            val photoVersion = result.optLong("photoVersion", 0L)
-                            if (photoUrl.isNotEmpty() && userId.isNotEmpty()) {
-                                val photoJson = """{"users":[{"userId":"$userId","command":"Photo","photoUrl":"${esc(photoUrl)}","photoVersion":$photoVersion}]}"""
-                                Log.d(TAG, "uploadProfilePhoto self→React: $photoJson")
-                                evalJs("window._onPresenceUpdate && window._onPresenceUpdate('${esc(photoJson)}')")
-                            }
-                        } catch (_: Exception) {}
-                    } catch (e: Exception) {
-                        Log.e(TAG, "uploadProfilePhoto error: ${e.message}", e)
-                        rejectToJs("uploadProfilePhoto", e.message)
-                    }
-                }
+                "uploadProfilePhoto" -> scope.launch { appHandler.handleUploadProfilePhoto(params) }
 
                 // ── 알림 ── (deleteNoti 는 nx 미호출로 제거)
                 "syncNoti", "loadMoreNotis", "getNotiCounts", "readNoti"
                     -> scope.launch { notiHandler.handle(action, params) }
+
+                // ── 앱 설정 동기화 ──
+                "syncConfig" -> scope.launch { appHandler.handleSyncConfig(params) }
+
+                // ── 채팅방 멤버 전체에게 쪽지 발송 ──
+                "sendMessageToRoomMembers" -> scope.launch { appHandler.handleSendMessageToRoomMembers(params) }
 
                 // ── 유저 구독 (Presence REST) ──
                 "subscribeUsers" -> scope.launch { handleRestForward("subscribeUsers", "/status/subscribe", params) }
@@ -556,6 +432,13 @@ class BridgeDispatcher(
                     resolveToJs("getPopupContext", ctx)
                 }
 
+                // ── 버디 그룹 관리 / 채팅 내보내기 / 채팅방 알림 (서버 경로 미확인 — stub) ──
+                "addBuddyGroup", "deleteBuddyGroup", "createSubGroup", "renameBuddyGroup",
+                "exportChat", "setRoomNotification" -> scope.launch {
+                    Log.d(TAG, "$action: not yet implemented on Android, resolving OK")
+                    resolveToJs(action, JSONObject().put("errorCode", 0))
+                }
+
                 // ── 미지원 기능 (모바일 stub) ──
                 "makeCall", "transferCall" -> scope.launch {
                     Log.d(TAG, "$action: not supported on Android, resolving OK")
@@ -575,7 +458,7 @@ class BridgeDispatcher(
                 }
 
                 // ── 데스크탑(Win/Mac) 전용 액션 — 모바일에서는 무시 ──
-                "windowDrag", "windowMinimize", "windowMaximize", "windowRestore",
+                "windowDrag", "windowMinimize", "windowMaximize", "windowRestore", "windowResize",
                 "mousedown", "mousemove" -> {
                     // no-op (모바일에는 윈도우 관리 개념 없음)
                 }
@@ -642,6 +525,7 @@ class BridgeDispatcher(
         }
     }
 
+    /** resolve/reject 전달용 — 서브 WebView가 열려 있으면 서브로, 아니면 메인으로. */
     override fun evalJs(js: String) {
         val target = if (activity.isSubWebViewOpen()) activity.getSubWebView() else webView
         target.post { target.evaluateJavascript(js, null) }
@@ -707,8 +591,9 @@ class BridgeDispatcher(
 
     override suspend fun saveChannelLocally(channelCode: String, members: List<String>, type: String) {
         val now = System.currentTimeMillis()
+        val state = if (members.size > 2) 1 else 0  // PRIVATE_CHAT=0, GROUP_CHAT=1
         dbProvider.getChatDatabase().channelDao()?.insert(
-            ChannelEntity(channelCode = channelCode, channelType = type, lastChatDate = now)
+            ChannelEntity(channelCode = channelCode, channelType = type, state = state, lastChatDate = now)
         )
         for (uid in members) {
             dbProvider.getChatDatabase().channelMemberDao()?.insert(
