@@ -1,0 +1,150 @@
+[33mcommit 5f8818dc3b932c8296a945e45e71e449a0e770a1[m[33m ([m[1;36mHEAD[m[33m -> [m[1;32mmain[m[33m)[m
+Author: Ultari RUserD <junggjo@ultari.co.kr>
+Date:   Thu Apr 9 20:13:31 2026 +0900
+
+    오늘 작업 내용 반영: HI 실패 처리, subscribe 안정화, getMyPart 캐시 등
+    
+    - SocketSessionManager: HI 비토큰 오류 시 hiCompletedDeferred.completeExceptionally() 처리
+    - PubSubRepository: sendSubscribe/resubscribeAll에서 HI 실패 시 try-catch로 빠른 종료
+    - OrgRepository: getMyPart 10초 TTL 메모리 캐시 추가 (JS 중복 호출 방지)
+    - defaultTopic 복구: INFO, ICON_UC 포함한 5개 토픽으로 원복
+    
+    Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>
+
+[33mcommit 912a0b8e18b1d41ac64cd9f12f6518f7e67e5039[m
+Author: Ultari RUserD <junggjo@ultari.co.kr>
+Date:   Thu Apr 9 19:47:31 2026 +0900
+
+    상태 관련 수정 업데이트
+    
+    - changeStatus: 백엔드 성공(errorCode==0) 확인 후에만 로컬 상태 저장 및 React 업데이트
+    - readChat: 로컬 DB offset 저장 완료 후 JS resolve (읽음 상태 일관성)
+    - PubSubRepository: defaultTopic에 INFO, ICON_UC 복원
+    - ChannelRepository: sanitizeAdditional 및 enrichChannelAdditional 개선
+    
+    Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>
+
+[33mcommit 25d386fbe30dffefcee74b10772001e86588298c[m[33m ([m[1;31morigin/main[m[33m)[m
+Author: Ultari RUserD <junggjo@ultari.co.kr>
+Date:   Wed Apr 8 19:31:45 2026 +0900
+
+    codex 검토 적용
+    
+    Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>
+
+[33mcommit f9d09e17841d31931acc56c4159752f49687adb5[m
+Author: Ultari RUserD <junggjo@ultari.co.kr>
+Date:   Wed Apr 8 15:41:34 2026 +0900
+
+    codex 검토 적용
+
+[33mcommit d8bc1f8c4adb36088598d88002478668694e5497[m
+Author: Ultari RUserD <junggjo@ultari.co.kr>
+Date:   Wed Apr 8 11:35:14 2026 +0900
+
+    작업 동기화
+    
+    Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>
+
+[33mcommit 6cf2aee19cf4053cda2fb979aafcb5a8927afe62[m
+Author: Ultari RUserD <junggjo@ultari.co.kr>
+Date:   Fri Apr 3 19:34:15 2026 +0900
+
+    쓰레드 관련 테이블 추가 및 파일전송 오류 수정
+
+[33mcommit 4127233545002372cbdc1aa78a51977adadd547b[m
+Author: Ultari RUserD <junggjo@ultari.co.kr>
+Date:   Fri Apr 3 12:42:32 2026 +0900
+
+    codex 수정 반영
+
+[33mcommit a5b72799aa6acb4815fb13d9b8816de356b6766b[m
+Author: Ultari RUserD <junggjo@ultari.co.kr>
+Date:   Fri Apr 3 12:16:06 2026 +0900
+
+    flutter 개선사항 반영
+
+[33mcommit f62f6a86cb23f3cc495914effde19a71b14a919d[m
+Author: Ultari RUserD <junggjo@ultari.co.kr>
+Date:   Thu Apr 2 19:26:34 2026 +0900
+
+    Revert "REMOVE_MEMBER 퇴장 시스템 메시지 표시"
+    
+    This reverts commit 1dbec8ba6a83b3b55783419deb2142240649d395.
+
+[33mcommit 1dbec8ba6a83b3b55783419deb2142240649d395[m
+Author: Ultari RUserD <junggjo@ultari.co.kr>
+Date:   Thu Apr 2 19:21:39 2026 +0900
+
+    REMOVE_MEMBER 퇴장 시스템 메시지 표시
+    
+    - PushEventHandler: RemoveChannelMemberEvent 수신 시 org DB에서 표시 이름 조회 후
+      chatType=99 시스템 채팅 DB 삽입 (본인 퇴장 및 채널 미존재 시 스킵)
+      chatCode는 "sys_rm_{channelCode}_{userId}_{unregistDate}" 결정적 키 사용 (중복 방지)
+    - MainActivity: ADD/REMOVE_CHANNEL_MEMBER_EVENT push 데이터에 userId → userName 보강
+      (WebView가 addLocalSystemChat 호출 시 표시 이름 활용)
+    
+    Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>
+
+[33mcommit 47720d2bfb5257e83a487393034a493a73392791[m
+Author: Ultari RUserD <junggjo@ultari.co.kr>
+Date:   Thu Apr 2 19:14:19 2026 +0900
+
+    codex 리뷰 수정: 세션 격리, DM dedup channelType 가드, 리액션 push syncChat, 채널 뱃지 타이밍
+    
+    - AppConfig: clearFrontendCache() 추가 — 로그아웃 시 FRONTEND_SKIN/VERSION 인메모리+SharedPrefs 초기화
+    - AuthRepository: logout()에서 clearFrontendCache() 호출 — 다음 사용자 세션에 stale 스킨 노출 방지
+    - ChannelRepository: DM dedup에 channelType == "DM" 가드 추가 — 2인 그룹방 오탐 방지
+    - PushEventHandler: 리액션 push 수신 시 syncChat 호출 — push payload 포맷 불일치로 직접 갱신 불가
+    - LoginViewModel: syncChat 완료 후 channelReady 재발행 — 포어그라운드 복귀 시 그룹방 뱃지/lastChat 반영
+    
+    Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>
+
+[33mcommit dffff4c3a101919afc3d665cb0b1472d627b7429[m
+Author: Ultari RUserD <junggjo@ultari.co.kr>
+Date:   Thu Apr 2 18:38:23 2026 +0900
+
+    앱 시작 지연 제거 및 DM 채널 중복 제거
+    
+    - AppConfig: init 블록에서 FRONTEND_SKIN/VERSION을 SharedPreferences에서 동기 로드하여 WebView 시작 시 올바른 URL 즉시 적용
+    - AppConfig: updateConfigCache()에서 FRONTEND_SKIN/VERSION 변경 시 SharedPreferences에 즉시 저장
+    - ChannelRepository: getChannelListAsJson()에 2인 DM 채널 중복 제거 로직 추가 (동일 멤버 쌍 중 lastChatDate 최신 채널만 유지)
+    - chore: app/build 빌드 아티팩트 git 추적 제거
+    
+    Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>
+
+[33mcommit 413b980b61863c24463d985709829e641e33843b[m
+Author: Ultari RUserD <junggjo@ultari.co.kr>
+Date:   Wed Apr 1 19:51:10 2026 +0900
+
+    codex 리뷰 받아서 수정함. 1.removeChannelMember 본인이면 채널삭제, 타인이면 해당멤버만삭제로 수정, 2.파일명 path traversal 3.Retrofit 캐시에ConcurrentHashMap
+
+[33mcommit 83c7a74f476c5b51a5286e38cdb2e987c63222f8[m
+Author: Ultari RUserD <junggjo@ultari.co.kr>
+Date:   Wed Apr 1 18:56:37 2026 +0900
+
+    추가수정2
+
+[33mcommit e7da1d48b4a41932625b04d4e6580bbfaef1e544[m
+Author: Ultari RUserD <junggjo@ultari.co.kr>
+Date:   Wed Apr 1 17:38:31 2026 +0900
+
+    BridgeDispatcher 리팩토링. handler 도메인 분리 적용
+
+[33mcommit d4648776efe9ccd668ffd88c11c92599b3d79031[m
+Author: Ultari RUserD <junggjo@ultari.co.kr>
+Date:   Wed Apr 1 16:34:17 2026 +0900
+
+    추가 수정
+
+[33mcommit 0a7406c6c51fe15b159f7d2fd99514e0f7fd440f[m
+Author: Ultari RUserD <junggjo@ultari.co.kr>
+Date:   Wed Apr 1 14:26:23 2026 +0900
+
+    project setup
+
+[33mcommit ce82c46e6083d3b28816c4f3f9708228949b800e[m
+Author:  <junggjo@ultari.co.kr>
+Date:   Wed Apr 1 02:35:18 2026 +0000
+
+    Initial commit

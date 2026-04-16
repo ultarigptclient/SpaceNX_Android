@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head><meta charset="UTF-8"><title>org.db — Hybrid-Talk v2</title>
+<link rel="stylesheet" href="../assets/style.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/kotlin.min.js"></script>
+<script>window.addEventListener('DOMContentLoaded',()=>hljs.highlightAll());</script>
+</head><body><div class="layout">
+
+<aside class="sidebar">
+    <h1>Hybrid-Talk v2</h1>
+    <div class="group"><div class="group-title">Overview</div><nav>
+        <a href="../index.html">시작하기</a><a href="../01-overview.html">전체 흐름도</a><a href="../02-communication.html">통신 구조</a>
+    </nav></div>
+    <div class="group"><div class="group-title">Architecture</div><nav>
+        <a href="../03-session-login.html">세션 &amp; 로그인</a><a href="../04-di.html">DI</a>
+        <a href="../05-bridge-handlers.html">Bridge &amp; Handlers</a><a href="../06-data-layer.html">Data Layer</a>
+    </nav></div>
+    <div class="group"><div class="group-title">Data</div><nav>
+        <a href="index.html">DB 개요 &amp; ER</a><a href="org-db.html" class="active">org.db</a>
+        <a href="chat-db.html">chat.db</a><a href="message-db.html">message.db</a>
+        <a href="noti-db.html">noti.db</a><a href="project-db.html">project.db</a>
+        <a href="common-setting.html">common / setting</a>
+    </nav></div>
+    <div class="group"><div class="group-title">API</div><nav>
+        <a href="../api/rest.html">REST API</a><a href="../api/binary.html">Binary Protocol</a>
+    </nav></div>
+    <div class="group"><div class="group-title">Flows</div><nav>
+        <a href="../flows/login.html">로그인</a><a href="../flows/initial-sync.html">초기 Sync</a>
+        <a href="../flows/chat-send.html">채팅 송수신</a><a href="../flows/push-event.html">Push 이벤트</a>
+        <a href="../flows/thread.html">말풍선↔스레드</a>
+    </nav></div>
+</aside>
+
+<main class="content">
+<h1>org.db <span class="chip">사용자별</span></h1>
+<p class="lead">조직도 · 사용자 · 버디(내 목록)를 저장. 파일: <code>org_{userId}.db</code>. 정의: <code>OrgDatabase.kt</code></p>
+
+<h2>엔티티 목록</h2>
+<table>
+    <tr><th>Entity</th><th>테이블</th><th>PK</th><th>역할</th></tr>
+    <tr><td><code>DeptEntity</code></td><td>depts</td><td>deptId</td><td>부서 (트리 구조, parentDeptId FK)</td></tr>
+    <tr><td><code>UserEntity</code></td><td>users</td><td>userId</td><td>조직원</td></tr>
+    <tr><td><code>BuddyEntity</code></td><td>buddies</td><td>(buddyId, userId)</td><td>내 목록 (즐겨찾기)</td></tr>
+    <tr><td><code>SyncMetaEntity</code></td><td>syncMeta</td><td>key</td><td>마지막 sync 시각</td></tr>
+</table>
+
+<h2>DeptEntity</h2>
+<pre><code class="language-kotlin">@Entity(tableName = "depts")
+data class DeptEntity(
+    @PrimaryKey val deptId: String,
+    val deptName: String = "",
+    val parentDeptId: String = "",      // 부모 부서 (루트는 "")
+    val hasChild: Boolean = false,
+    val userCount: Int = 0,
+    val sortOrder: Int = 0
+)</code></pre>
+
+<h2>UserEntity</h2>
+<pre><code class="language-kotlin">@Entity(tableName = "users")
+data class UserEntity(
+    @PrimaryKey val userId: String,
+    val userName: String = "",
+    val deptId: String = "",
+    val deptName: String = "",
+    val position: String = "",          // 직급/직책
+    val email: String = "",
+    val mobile: String = "",
+    val photoUrl: String = "",
+    val photoVersion: Long = 0L,        // 캐시 버스팅
+    val userInfo: String = "{}"         // 확장 JSON
+)</code></pre>
+
+<h2>BuddyEntity (내 목록)</h2>
+<pre><code class="language-kotlin">@Entity(tableName = "buddies", primaryKeys = ["buddyId", "userId"])
+data class BuddyEntity(
+    val buddyId: String,                // 폴더 ID (그룹)
+    val userId: String,                 // 추가된 사용자
+    val buddyName: String = "",
+    val buddyType: String = "USER",     // USER / GROUP
+    val sortOrder: Int = 0
+)</code></pre>
+
+<h2>주요 DAO 쿼리</h2>
+<table>
+    <tr><th>Query</th><th>용도</th></tr>
+    <tr><td><code>deptDao.getRootDepts()</code></td><td>루트 부서 (parentDeptId = "")</td></tr>
+    <tr><td><code>deptDao.getByParent(parentDeptId)</code></td><td>하위 부서 목록</td></tr>
+    <tr><td><code>userDao.getByDept(deptId)</code></td><td>부서별 사용자</td></tr>
+    <tr><td><code>userDao.searchByKeyword(kw)</code></td><td>이름/직급/이메일 검색</td></tr>
+    <tr><td><code>userDao.getByUserIds(ids)</code></td><td>일괄 조회 (<code>getUserInfo</code> 액션에서 사용)</td></tr>
+    <tr><td><code>buddyDao.getAll()</code></td><td>내 목록 전체</td></tr>
+</table>
+
+<h2>Sync 흐름</h2>
+<p><code>syncOrg</code> (<code>POST /api/org/syncorg</code>) → DeptEntity + UserEntity 일괄 upsert.<br/>
+<code>syncBuddy</code> (<code>POST /api/buddy/syncbuddy</code>) → BuddyEntity upsert. 이후 <code>autoSubscribeUsers</code>로 Binary SUBSCRIBE.</p>
+
+<div class="page-nav">
+    <a href="index.html" class="prev">DB 개요</a>
+    <a href="chat-db.html" class="next">chat.db</a>
+</div>
+
+</main></div></body></html>

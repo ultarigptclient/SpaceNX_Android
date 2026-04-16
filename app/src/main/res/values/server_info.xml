@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources xmlns:tools="http://schemas.android.com/tools">
+
+    <string name="messengerserver_private_ip" translatable="false" type="string">neo.ultari.co.kr</string>
+    <string name="messengerserver_private_port" translatable="false" type="string">18019</string>
+    <string name="proxyserver_private_ip" translatable="false" type="string">neo.ultari.co.kr</string>
+    <string name="proxyserver_private_port" translatable="false" type="string">18001</string>
+    <string name="messengerserver_public_ip" translatable="false" type="string">neo.ultari.co.kr</string>
+    <string name="messengerserver_public_port" translatable="false" type="string">18019</string>
+    <string name="proxyserver_public_ip" translatable="false" type="string">neo.ultari.co.kr</string>
+    <string name="proxyserver_public_port" translatable="false" type="string">18001</string>
+
+</resources>

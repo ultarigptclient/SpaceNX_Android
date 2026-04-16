@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head><meta charset="UTF-8"><title>common / setting — Hybrid-Talk v2</title>
+<link rel="stylesheet" href="../assets/style.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/kotlin.min.js"></script>
+<script>window.addEventListener('DOMContentLoaded',()=>hljs.highlightAll());</script>
+</head><body><div class="layout">
+
+<aside class="sidebar">
+    <h1>Hybrid-Talk v2</h1>
+    <div class="group"><div class="group-title">Overview</div><nav>
+        <a href="../index.html">시작하기</a><a href="../01-overview.html">전체 흐름도</a><a href="../02-communication.html">통신 구조</a>
+    </nav></div>
+    <div class="group"><div class="group-title">Architecture</div><nav>
+        <a href="../03-session-login.html">세션 &amp; 로그인</a><a href="../04-di.html">DI</a>
+        <a href="../05-bridge-handlers.html">Bridge &amp; Handlers</a><a href="../06-data-layer.html">Data Layer</a>
+    </nav></div>
+    <div class="group"><div class="group-title">Data</div><nav>
+        <a href="index.html">DB 개요 &amp; ER</a><a href="org-db.html">org.db</a>
+        <a href="chat-db.html">chat.db</a><a href="message-db.html">message.db</a>
+        <a href="noti-db.html">noti.db</a><a href="project-db.html">project.db</a>
+        <a href="common-setting.html" class="active">common / setting</a>
+    </nav></div>
+    <div class="group"><div class="group-title">API</div><nav>
+        <a href="../api/rest.html">REST API</a><a href="../api/binary.html">Binary Protocol</a>
+    </nav></div>
+    <div class="group"><div class="group-title">Flows</div><nav>
+        <a href="../flows/login.html">로그인</a><a href="../flows/initial-sync.html">초기 Sync</a>
+        <a href="../flows/chat-send.html">채팅 송수신</a><a href="../flows/push-event.html">Push 이벤트</a>
+        <a href="../flows/thread.html">말풍선↔스레드</a>
+    </nav></div>
+</aside>
+
+<main class="content">
+<h1>common.db + setting.db</h1>
+<p class="lead">
+    common은 로그인 전에도 접근 가능한 전역 DB, setting은 사용자 개인 설정.
+</p>
+
+<h2>common.db <span class="chip">전역</span></h2>
+
+<p>파일: <code>common.db</code> (userId 접미사 없음). 정의: <code>CommonDatabase.kt</code></p>
+
+<table>
+    <tr><th>Entity</th><th>테이블</th><th>역할</th></tr>
+    <tr><td><code>CommonEntity</code></td><td>common</td><td>key-value 저장소 — 서버 설정, 버전, FCM 토큰 등</td></tr>
+    <tr><td><code>SyncMetaEntity</code></td><td>syncMeta</td><td>도메인별 마지막 sync 시각 (예: <code>chat_last_sync_time</code>)</td></tr>
+</table>
+
+<h3>CommonEntity</h3>
+<pre><code class="language-kotlin">@Entity(tableName = "common")
+data class CommonEntity(
+    @PrimaryKey val key: String,
+    val value: String = ""
+)</code></pre>
+
+<h3>주요 키 (관례)</h3>
+<table>
+    <tr><th>key</th><th>용도</th></tr>
+    <tr><td><code>FRONTEND_VERSION</code></td><td>SPA 빌드 버전 (URL 조합)</td></tr>
+    <tr><td><code>FRONTEND_SKIN</code></td><td>테마 스킨 ID</td></tr>
+    <tr><td><code>ultari.rest.base-url</code></td><td>REST 기본 URL (syncConfig 결과)</td></tr>
+    <tr><td><code>ultari.rest.endpoints.*</code></td><td>개별 엔드포인트 경로</td></tr>
+    <tr><td><code>fcm_token</code></td><td>FCM 토큰 캐시</td></tr>
+</table>
+
+<h3>SyncMetaEntity</h3>
+<pre><code class="language-kotlin">@Entity(tableName = "syncMeta")
+data class SyncMetaEntity(
+    @PrimaryKey val key: String,
+    val value: String = ""              // 대부분 Long (epoch ms) 또는 eventId
+)</code></pre>
+
+<p>주요 키: <code>chat_last_sync_time</code>, <code>channel_last_sync_time</code>, <code>message_last_sync_time</code>, <code>noti_last_event_id</code> 등.</p>
+
+<h2>setting.db <span class="chip">사용자별</span></h2>
+
+<p>파일: <code>setting_{userId}.db</code>. 정의: <code>SettingDatabase.kt</code></p>
+
+<table>
+    <tr><th>Entity</th><th>테이블</th><th>역할</th></tr>
+    <tr><td><code>SettingEntity</code></td><td>settings</td><td>사용자 개인 설정 key-value</td></tr>
+</table>
+
+<h3>SettingEntity</h3>
+<pre><code class="language-kotlin">@Entity(tableName = "settings")
+data class SettingEntity(
+    @PrimaryKey val key: String,
+    val value: String = ""
+)</code></pre>
+
+<h3>사용 예</h3>
+<ul>
+    <li>사용자 UI 설정 (다크모드, 폰트크기 등)</li>
+    <li>알림 토글 (채널별 뮤트는 별도 <code>AppConfig</code>에 보관)</li>
+    <li><code>getUserConfig</code> / <code>setUserConfig</code> 브릿지 액션에서 읽고 씀</li>
+</ul>
+
+<div class="callout warn">
+    <strong>참고: AppConfig와의 차이</strong><br/>
+    <code>AppConfig</code> (<code>common/AppConfig.kt</code>)는 <strong>EncryptedSharedPreferences</strong> 기반.
+    민감한 자격증명/토큰 저장용. 반면 <code>setting.db</code>는 평문 Room DB (SQLCipher로는 암호화됨)로 일반 UX 설정용.
+</div>
+
+<div class="page-nav">
+    <a href="project-db.html" class="prev">project.db</a>
+    <a href="../api/rest.html" class="next">API: REST</a>
+</div>
+
+</main></div></body></html>

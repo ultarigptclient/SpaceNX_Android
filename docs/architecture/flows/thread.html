@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head><meta charset="UTF-8"><title>말풍선 ↔ 스레드 ↔ 이슈 — Hybrid-Talk v2</title>
+<link rel="stylesheet" href="../assets/style.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/kotlin.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<script>mermaid.initialize({startOnLoad:true,theme:'dark'});window.addEventListener('DOMContentLoaded',()=>hljs.highlightAll());</script>
+</head><body><div class="layout">
+
+<aside class="sidebar">
+    <h1>Hybrid-Talk v2</h1>
+    <div class="group"><div class="group-title">Overview</div><nav>
+        <a href="../index.html">시작하기</a><a href="../01-overview.html">전체 흐름도</a><a href="../02-communication.html">통신 구조</a>
+    </nav></div>
+    <div class="group"><div class="group-title">Architecture</div><nav>
+        <a href="../03-session-login.html">세션 &amp; 로그인</a><a href="../04-di.html">DI</a>
+        <a href="../05-bridge-handlers.html">Bridge &amp; Handlers</a><a href="../06-data-layer.html">Data Layer</a>
+    </nav></div>
+    <div class="group"><div class="group-title">Data</div><nav>
+        <a href="../data/index.html">DB 개요 &amp; ER</a><a href="../data/org-db.html">org.db</a>
+        <a href="../data/chat-db.html">chat.db</a><a href="../data/message-db.html">message.db</a>
+        <a href="../data/noti-db.html">noti.db</a><a href="../data/project-db.html">project.db</a>
+        <a href="../data/common-setting.html">common / setting</a>
+    </nav></div>
+    <div class="group"><div class="group-title">API</div><nav>
+        <a href="../api/rest.html">REST API</a><a href="../api/binary.html">Binary Protocol</a>
+    </nav></div>
+    <div class="group"><div class="group-title">Flows</div><nav>
+        <a href="login.html">로그인</a><a href="initial-sync.html">초기 Sync</a>
+        <a href="chat-send.html">채팅 송수신</a><a href="push-event.html">Push 이벤트</a>
+        <a href="thread.html" class="active">말풍선↔스레드</a>
+    </nav></div>
+</aside>
+
+<main class="content">
+<h1>Flow: 말풍선 ↔ 스레드 ↔ 이슈</h1>
+<p class="lead">
+    이 앱에서 "답글"은 메시지 인라인 reply가 아니라 <strong>스레드 패널에서 대화하는 형태</strong>입니다 (Slack 스타일).
+    말풍선 스레드와 이슈 스레드는 서로 다른 진입점을 갖지만 결국 <strong>같은 댓글 테이블</strong>을 공유합니다.
+</p>
+
+<h2>1. 핵심 개념</h2>
+
+<div class="mermaid">
+flowchart TB
+    CT[ChatThreadEntity<br/>chatCode → threadCode]
+    IT[IssueThreadEntity<br/>issueCode → threadCode]
+    TC[ThreadCommentEntity<br/>threadCode → comments]
+
+    CT --&gt; TC
+    IT --&gt; TC
+
+    style TC fill:#0ea5e9,color:#fff
+</div>
+
+<p><code>ThreadCommentEntity</code>가 공통 허브. 스레드 출처가 말풍선이든 이슈든 상관없이 <code>threadCode</code>만 다르고 댓글 처리 로직은 동일.</p>
+
+<h2>2. 말풍선 → 스레드 열기</h2>
+
+<div class="mermaid">
+sequenceDiagram
+    autonumber
+    participant U as 사용자
+    participant CP as React ChatPage
+    participant B as Bridge
+    participant NS as NeoSendHandler
+    participant REST
+    participant DB as project.db
+
+    U->>CP: 말풍선 길게 누름/우클릭 → "답글"
+    CP->>CP: onThread(chatCode)
+    CP->>B: Bridge.apiPost('/comm/getchatthread', {chatCode})
+    B->>NS: 범용 REST 포워딩
+    NS->>REST: POST /api/comm/getchatthread
+    REST-->>NS: {threadCode, commentCount} or {errorCode:404}
+
+    alt 기존 스레드 있음
+        NS-->>CP: {threadCode}
+        CP->>B: Bridge.apiPost('/comm/getthreadcomments', {threadCode})
+        CP->>CP: 댓글 목록 렌더링
+    else 첫 답글 (스레드 없음)
+        CP->>B: Bridge.apiPost('/comm/createchatthread', {chatCode, channelCode})
+        NS->>REST: POST /api/comm/createchatthread
+        REST-->>NS: {threadCode} (서버 발급)
+        NS->>DB: ChatThreadEntity.upsert
+        NS-->>CP: {threadCode}
+    end
+
+    U->>CP: 댓글 입력 + 전송
+    CP->>B: Bridge.apiPost('/comm/addthreadcomment',<br/>{threadCode, userId, contents})
+    B->>REST: POST /api/comm/addthreadcomment
+    REST-->>B: {commentId}
+    Note over CP: 말풍선 옆에 "N개 답글" 배지 표시
+</div>
+
+<h2>3. 이슈 → 스레드 자동 생성</h2>
+
+<div class="mermaid">
+sequenceDiagram
+    autonumber
+    participant U
+    participant IP as React IssuePage
+    participant B as Bridge
+    participant REST
+    participant DB as project.db
+
+    U->>IP: 이슈 생성 폼 입력
+    IP->>B: Bridge.apiPost('/comm/createissue',<br/>{title, description, projectCode, ...})
+    B->>REST: POST /api/comm/createissue
+    REST-->>B: {issueCode}
+    B->>DB: IssueEntity.upsert
+
+    IP->>B: Bridge.apiPost('/comm/createissuethread', {issueCode})
+    B->>REST: POST /api/comm/createissuethread
+    REST-->>B: {threadCode}
+    B->>DB: IssueThreadEntity.upsert<br/>+ IssueEntity.threadCode 갱신
+
+    Note over IP: 이슈 상세 화면에 스레드 패널 표시
+
+    U->>IP: 댓글 입력
+    IP->>B: Bridge.apiPost('/comm/addthreadcomment',<br/>{threadCode, userId, contents})
+    B->>REST: POST /api/comm/addthreadcomment
+    Note right of IP: 대화 스레드와 완전히 동일한 API
+</div>
+
+<h2>4. 채널 진입 시 스레드 맵 로드</h2>
+
+<p>채널에 들어가면 해당 채널의 모든 말풍선 스레드 정보를 한 번에 가져옵니다. 각 말풍선 옆 "N개 답글" 배지를 그리기 위함.</p>
+
+<pre><code class="language-javascript">// ChatPage 진입 시
+const result = await Bridge.getThreadsByChannel(channelCode);
+// → {threads: [{chatCode, threadCode, commentCount}, ...]}
+const threadMap = {};
+result.threads.forEach(t =&gt; { threadMap[t.chatCode] = t.commentCount; });</code></pre>
+
+<p>Android 측은 로컬 <code>chatThreads</code> 테이블에서 즉시 조회 후 REST fallback:</p>
+
+<pre><code class="language-kotlin">"getThreadsByChannel" -&gt; scope.launch {
+    try {
+        val local = projectRepo.getThreadsByChannel(channelCode)
+        if (local.optJSONArray("threads")?.length() &gt; 0) {
+            resolveToJs("getThreadsByChannel", local)
+        } else {
+            handleRestForward("getThreadsByChannel", "/comm/getthreadsbychannel", params)
+        }
+    } catch (_: Exception) {
+        handleRestForward(...)  // fallback
+    }
+}</code></pre>
+
+<h2>5. 댓글 삭제/수정</h2>
+
+<table>
+    <tr><th>기능</th><th>Endpoint</th></tr>
+    <tr><td>댓글 작성</td><td><code>/comm/addthreadcomment</code></td></tr>
+    <tr><td>댓글 삭제</td><td><code>/comm/deletethreadcomment</code></td></tr>
+    <tr><td>댓글 조회</td><td><code>/comm/getthreadcomments</code></td></tr>
+</table>
+
+<h2>6. Push 이벤트</h2>
+
+<table>
+    <tr><th>Event</th><th>Code</th><th>처리</th></tr>
+    <tr><td><code>CREATE_CHAT_THREAD_EVENT</code></td><td>0x028F</td><td>ChatThreadEntity upsert + Web 알림</td></tr>
+    <tr><td><code>DELETE_CHAT_THREAD_EVENT</code></td><td>0x0298</td><td>삭제</td></tr>
+    <tr><td><code>ADD_COMMENT_EVENT</code></td><td>0x0299</td><td>ThreadCommentEntity upsert + commentCount 증가</td></tr>
+    <tr><td><code>DELETE_COMMENT_EVENT</code></td><td>0x029A</td><td>commentCount 감소</td></tr>
+    <tr><td><code>MOD_THREAD_EVENT</code></td><td>0x028C</td><td>스레드 메타 변경</td></tr>
+</table>
+
+<figure>
+    <img src="../assets/images/g.png" alt="말풍선 스레드 흐름">
+    <figcaption>원본 — 말풍선에서 스레드를 여는 상세 흐름</figcaption>
+</figure>
+
+<figure>
+    <img src="../assets/images/j.png" alt="전체 관계 요약">
+    <figcaption>원본 — 관계 표 + 핵심 포인트 (ChatThread/IssueThread가 댓글 공유)</figcaption>
+</figure>
+
+<h2>7. 주의사항</h2>
+<div class="callout warn">
+    <ul>
+        <li>현재 Android 측 <code>IssueThreadEntity</code>와 <code>ChatThreadEntity</code> 양쪽 모두 sync 로직이 <code>ProjectRepository</code>에 집중되어 있어 Repository 분할이 필요</li>
+        <li><code>threadCode</code>는 전역 유니크 가정 (서버 발급). 말풍선/이슈 스레드가 같은 네임스페이스 사용</li>
+        <li><code>IssueEntity.threadCode</code>는 편의 캐시. 실제 FK는 <code>IssueThreadEntity</code>를 거쳐 <code>ThreadCommentEntity</code>로 이어짐</li>
+    </ul>
+</div>
+
+<div class="page-nav">
+    <a href="push-event.html" class="prev">Push 이벤트</a>
+    <a href="../index.html" class="next">시작하기</a>
+</div>
+
+</main></div></body></html>

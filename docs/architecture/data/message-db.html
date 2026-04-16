@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head><meta charset="UTF-8"><title>message.db — Hybrid-Talk v2</title>
+<link rel="stylesheet" href="../assets/style.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/kotlin.min.js"></script>
+<script>window.addEventListener('DOMContentLoaded',()=>hljs.highlightAll());</script>
+</head><body><div class="layout">
+
+<aside class="sidebar">
+    <h1>Hybrid-Talk v2</h1>
+    <div class="group"><div class="group-title">Overview</div><nav>
+        <a href="../index.html">시작하기</a><a href="../01-overview.html">전체 흐름도</a><a href="../02-communication.html">통신 구조</a>
+    </nav></div>
+    <div class="group"><div class="group-title">Architecture</div><nav>
+        <a href="../03-session-login.html">세션 &amp; 로그인</a><a href="../04-di.html">DI</a>
+        <a href="../05-bridge-handlers.html">Bridge &amp; Handlers</a><a href="../06-data-layer.html">Data Layer</a>
+    </nav></div>
+    <div class="group"><div class="group-title">Data</div><nav>
+        <a href="index.html">DB 개요 &amp; ER</a><a href="org-db.html">org.db</a>
+        <a href="chat-db.html">chat.db</a><a href="message-db.html" class="active">message.db</a>
+        <a href="noti-db.html">noti.db</a><a href="project-db.html">project.db</a>
+        <a href="common-setting.html">common / setting</a>
+    </nav></div>
+    <div class="group"><div class="group-title">API</div><nav>
+        <a href="../api/rest.html">REST API</a><a href="../api/binary.html">Binary Protocol</a>
+    </nav></div>
+    <div class="group"><div class="group-title">Flows</div><nav>
+        <a href="../flows/login.html">로그인</a><a href="../flows/initial-sync.html">초기 Sync</a>
+        <a href="../flows/chat-send.html">채팅 송수신</a><a href="../flows/push-event.html">Push 이벤트</a>
+        <a href="../flows/thread.html">말풍선↔스레드</a>
+    </nav></div>
+</aside>
+
+<main class="content">
+<h1>message.db <span class="chip">사용자별 / 쪽지</span></h1>
+<p class="lead">
+    쪽지(Note)는 채팅과 분리된 1:1 또는 1:N 메시지입니다. 채팅과는 다른 sync 주기·회수(Retrieve) 기능·첨부 처리.
+    파일: <code>message_{userId}.db</code>. 정의: <code>MessageDatabase.kt</code>
+</p>
+
+<h2>엔티티 목록</h2>
+<table>
+    <tr><th>Entity</th><th>테이블</th><th>PK</th><th>역할</th></tr>
+    <tr><td><code>MessageEntity</code></td><td>messages</td><td>messageCode</td><td>쪽지 본문</td></tr>
+    <tr><td><code>AttachEntity</code></td><td>attaches</td><td>attachId</td><td>파일 첨부 (<code>messageCode</code> FK)</td></tr>
+    <tr><td><code>MessageEventEntity</code></td><td>messageEvents</td><td>eventId</td><td>Push 이벤트 로그</td></tr>
+    <tr><td><code>SyncMetaEntity</code></td><td>syncMeta</td><td>key</td><td>sync 상태</td></tr>
+</table>
+
+<h2>MessageEntity</h2>
+<pre><code class="language-kotlin">@Entity(tableName = "messages")
+data class MessageEntity(
+    @PrimaryKey val messageCode: String,
+    val sendUserId: String = "",
+    val sendUserName: String = "",
+    val receivers: String = "[]",       // JSON 배열 [{userId, read:bool, readDate}]
+    val title: String = "",
+    val contents: String = "",
+    val sendDate: Long = 0L,
+    val readCount: Int = 0,
+    val totalReceivers: Int = 0,
+    val retrieved: Int = 0,              // 1=회수됨
+    val additional: String = "{}"
+)</code></pre>
+
+<h2>AttachEntity</h2>
+<pre><code class="language-kotlin">@Entity(tableName = "attaches")
+data class AttachEntity(
+    @PrimaryKey(autoGenerate = true) val attachId: Int = 0,
+    val messageCode: String = "",
+    val fileName: String = "",
+    val fileSize: Long = 0L,
+    val mimeType: String = "",
+    val url: String = "",
+    val uploadDate: Long = 0L
+)</code></pre>
+
+<h2>주요 기능</h2>
+<table>
+    <tr><th>기능</th><th>API</th><th>Repository</th></tr>
+    <tr><td>쪽지 목록 sync</td><td><code>POST /api/comm/syncmessage</code></td><td><code>MessageRepository.syncMessage()</code></td></tr>
+    <tr><td>쪽지 송신</td><td><code>POST /api/comm/sendmessage</code></td><td><code>MessageRepository.sendMessage()</code></td></tr>
+    <tr><td>읽음 처리</td><td><code>POST /api/comm/readmessage</code></td><td><code>MessageRepository.readMessage()</code></td></tr>
+    <tr><td>회수 (Retrieve)</td><td><code>POST /api/comm/retrievemessage</code></td><td><code>handleRetrieveMessage()</code></td></tr>
+    <tr><td>상세 조회</td><td><code>POST /api/comm/getmessagedetail</code></td><td><code>handleGetMessageDetail()</code></td></tr>
+    <tr><td>카운트 조회</td><td>로컬 DAO</td><td><code>handleGetMessageCounts()</code></td></tr>
+</table>
+
+<h2>회수(Retrieve) 기능</h2>
+<p>송신자가 자기가 보낸 쪽지를 취소하는 기능. DB 상 <code>retrieved=1</code>로 마킹. Push 이벤트 <code>RETRIEVE_MESSAGE_EVENT (0x0B83)</code> 수신 시 수신자 측에서 같은 처리.</p>
+
+<h2>Mutex 패턴</h2>
+<p><code>MessageRepository</code>는 동시 sync 요청을 방지하기 위해 <code>Mutex</code>를 씁니다:</p>
+<pre><code class="language-kotlin">private val syncMutex = Mutex()
+
+suspend fun syncMessage(userId: String): JSONObject = syncMutex.withLock {
+    // sync 로직
+}</code></pre>
+
+<div class="page-nav">
+    <a href="chat-db.html" class="prev">chat.db</a>
+    <a href="noti-db.html" class="next">noti.db</a>
+</div>
+
+</main></div></body></html>

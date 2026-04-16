@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head><meta charset="UTF-8"><title>REST API — Hybrid-Talk v2</title>
+<link rel="stylesheet" href="../assets/style.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/kotlin.min.js"></script>
+<script>window.addEventListener('DOMContentLoaded',()=>hljs.highlightAll());</script>
+</head><body><div class="layout">
+
+<aside class="sidebar">
+    <h1>Hybrid-Talk v2</h1>
+    <div class="group"><div class="group-title">Overview</div><nav>
+        <a href="../index.html">시작하기</a><a href="../01-overview.html">전체 흐름도</a><a href="../02-communication.html">통신 구조</a>
+    </nav></div>
+    <div class="group"><div class="group-title">Architecture</div><nav>
+        <a href="../03-session-login.html">세션 &amp; 로그인</a><a href="../04-di.html">DI</a>
+        <a href="../05-bridge-handlers.html">Bridge &amp; Handlers</a><a href="../06-data-layer.html">Data Layer</a>
+    </nav></div>
+    <div class="group"><div class="group-title">Data</div><nav>
+        <a href="../data/index.html">DB 개요 &amp; ER</a><a href="../data/org-db.html">org.db</a>
+        <a href="../data/chat-db.html">chat.db</a><a href="../data/message-db.html">message.db</a>
+        <a href="../data/noti-db.html">noti.db</a><a href="../data/project-db.html">project.db</a>
+        <a href="../data/common-setting.html">common / setting</a>
+    </nav></div>
+    <div class="group"><div class="group-title">API</div><nav>
+        <a href="rest.html" class="active">REST API</a><a href="binary.html">Binary Protocol</a>
+    </nav></div>
+    <div class="group"><div class="group-title">Flows</div><nav>
+        <a href="../flows/login.html">로그인</a><a href="../flows/initial-sync.html">초기 Sync</a>
+        <a href="../flows/chat-send.html">채팅 송수신</a><a href="../flows/push-event.html">Push 이벤트</a>
+        <a href="../flows/thread.html">말풍선↔스레드</a>
+    </nav></div>
+</aside>
+
+<main class="content">
+<h1>REST API (Retrofit)</h1>
+<p class="lead">
+    7개의 Retrofit 인터페이스와 범용 POST 메서드 구성. Base URL은 서버 설정 기반 가변.
+</p>
+
+<h2>1. 구조</h2>
+
+<table>
+    <tr><th>인터페이스</th><th>도메인</th><th>예시 엔드포인트</th></tr>
+    <tr><td><code>AuthApi</code></td><td>로그인 / 토큰 / 설정</td><td><code>/api/auth/login</code>, <code>/api/auth/refresh</code>, <code>/api/auth/syncconfig</code></td></tr>
+    <tr><td><code>OrgApi</code></td><td>조직도</td><td><code>/api/org/syncorg</code>, <code>/api/org/getrootdepts</code>, <code>/api/org/updateprofile</code></td></tr>
+    <tr><td><code>BuddyApi</code></td><td>내 목록</td><td><code>/api/buddy/syncbuddy</code>, <code>/api/buddy/addusertomy</code></td></tr>
+    <tr><td><code>ChannelApi</code></td><td>채널 관리</td><td><code>/api/comm/syncchannel</code>, <code>/api/comm/makechannel</code>, <code>/api/comm/addchannelmember</code></td></tr>
+    <tr><td><code>CommApi</code></td><td>채팅/쪽지/프로젝트 공통</td><td><code>/api/comm/sendchat</code>, <code>/api/comm/sendmessage</code>, <code>/api/comm/createissue</code></td></tr>
+    <tr><td><code>StatusApi</code></td><td>상태/프레즌스</td><td><code>/api/status/setpresence</code>, <code>/api/status/subscribe</code></td></tr>
+    <tr><td><code>UpdateApi</code></td><td>앱 업데이트 체크</td><td><code>/api/update/checkversion</code></td></tr>
+</table>
+
+<h2>2. ApiClient (중앙 컨트롤)</h2>
+
+<p><code>data/remote/api/ApiClient.kt</code>는 Kotlin <code>object</code>로 Retrofit 인스턴스를 관리하고, 인터페이스 메서드 외에 범용 <code>postJson</code>/파일 업로드 기능을 제공합니다.</p>
+
+<h3>2-1. 범용 POST</h3>
+<pre><code class="language-kotlin">fun postJson(
+    url: String,
+    body: JSONObject,
+    token: String? = null
+): JSONObject {
+    val req = Request.Builder()
+        .url(url)
+        .post(body.toString().toRequestBody("application/json".toMediaType()))
+        .apply { if (token != null) addHeader("Authorization", "Bearer $token") }
+        .build()
+    val resp = okHttp.newCall(req).execute()
+    return JSONObject(resp.body?.string() ?: "{}")
+}</code></pre>
+
+<h3>2-2. 파일 업로드</h3>
+<pre><code class="language-kotlin">fun uploadFile(
+    fileName: String,
+    mimeType: String,
+    base64Data: String,
+    uploadUrl: String? = null,
+    token: String? = null
+): JSONObject { /* multipart/form-data */ }
+
+fun uploadFileStream(
+    stream: InputStream,
+    fileName: String,
+    mimeType: String,
+    fileSize: Long,
+    uploadUrl: String,
+    token: String?,
+    onProgress: (sent: Long, total: Long) -&gt; Unit
+): JSONObject { /* 스트리밍 + 진행률 콜백 */ }</code></pre>
+
+<h2>3. JWT 인증</h2>
+
+<p>모든 요청 헤더에 <code>Authorization: Bearer {accessToken}</code>. 401 수신 시 <code>refreshToken</code>으로 자동 재시도.</p>
+
+<pre><code class="language-kotlin">// 저장 위치
+val token = appConfig.getSavedToken()    // EncryptedSharedPreferences
+
+// 사용 (Handler에서)
+val result = withContext(Dispatchers.IO) {
+    ApiClient.postJson(
+        appConfig.getEndpointByPath("/comm/sendchat"),
+        body,
+        appConfig.getSavedToken()
+    )
+}</code></pre>
+
+<h2>4. Endpoint Resolution</h2>
+
+<p>실제 사용되는 URL은 3단계 fallback으로 결정됩니다:</p>
+
+<ol>
+    <li><code>AppConfig.configCache["ultari.rest.endpoints.{name}"]</code> (syncConfig 결과)</li>
+    <li><code>AppConfig.configCache["ultari.rest.base-url"]</code> + 기본 경로</li>
+    <li><code>strings.xml</code>의 hardcoded 기본값</li>
+</ol>
+
+<pre><code class="language-kotlin">// 도움 함수
+appConfig.getEndpointByPath("/comm/sendchat")
+// → https://neo.ultari.co.kr:18019/api/comm/sendchat</code></pre>
+
+<h2>5. 주요 엔드포인트 카탈로그</h2>
+
+<h3>인증 / 설정</h3>
+<table>
+    <tr><th>Endpoint</th><th>Body</th><th>Response</th></tr>
+    <tr><td><code>POST /api/auth/login</code></td><td><code>{loginId, password}</code></td><td><code>{accessToken, refreshToken, userId, userName, deptId}</code></td></tr>
+    <tr><td><code>POST /api/auth/refresh</code></td><td><code>{refreshToken}</code></td><td><code>{accessToken, refreshToken}</code></td></tr>
+    <tr><td><code>POST /api/auth/syncconfig</code></td><td><code>{lastSyncTime}</code></td><td><code>{configs:{...}, lastSyncTime}</code></td></tr>
+</table>
+
+<h3>조직도</h3>
+<table>
+    <tr><th>Endpoint</th><th>용도</th></tr>
+    <tr><td><code>POST /api/org/syncorg</code></td><td>부서+유저 증분 동기화</td></tr>
+    <tr><td><code>POST /api/org/getrootdepts</code></td><td>루트 부서</td></tr>
+    <tr><td><code>POST /api/org/getsubdepts</code></td><td>하위 부서/유저</td></tr>
+    <tr><td><code>POST /api/org/searchusers</code></td><td>사용자 검색</td></tr>
+    <tr><td><code>POST /api/org/updateprofile</code></td><td>프로필 수정</td></tr>
+</table>
+
+<h3>채널 / 채팅</h3>
+<table>
+    <tr><th>Endpoint</th><th>용도</th></tr>
+    <tr><td><code>POST /api/comm/syncchannel</code></td><td>채널 목록 sync</td></tr>
+    <tr><td><code>POST /api/comm/syncchat</code></td><td>채팅 메시지 sync (증분)</td></tr>
+    <tr><td><code>POST /api/comm/makechannel</code></td><td>채널 생성 (DM/GROUP)</td></tr>
+    <tr><td><code>POST /api/comm/addchannelmember</code></td><td>멤버 추가</td></tr>
+    <tr><td><code>POST /api/comm/removechannelmember</code></td><td>멤버 제거</td></tr>
+    <tr><td><code>POST /api/comm/destroychannel</code></td><td>채널 삭제</td></tr>
+    <tr><td><code>POST /api/comm/sendchat</code></td><td>메시지 송신</td></tr>
+    <tr><td><code>POST /api/comm/readchat</code></td><td>읽음 처리</td></tr>
+    <tr><td><code>POST /api/comm/deletechat</code></td><td>메시지 삭제</td></tr>
+    <tr><td><code>POST /api/comm/modchat</code></td><td>메시지 수정</td></tr>
+    <tr><td><code>POST /api/comm/typingchat</code></td><td>타이핑 상태</td></tr>
+    <tr><td><code>POST /api/comm/forwardchat</code></td><td>다른 방으로 전달</td></tr>
+</table>
+
+<h3>쪽지</h3>
+<table>
+    <tr><th>Endpoint</th><th>용도</th></tr>
+    <tr><td><code>POST /api/comm/syncmessage</code></td><td>쪽지 sync</td></tr>
+    <tr><td><code>POST /api/comm/sendmessage</code></td><td>쪽지 송신</td></tr>
+    <tr><td><code>POST /api/comm/readmessage</code></td><td>읽음 처리</td></tr>
+    <tr><td><code>POST /api/comm/deletemessage</code></td><td>삭제</td></tr>
+    <tr><td><code>POST /api/comm/retrievemessage</code></td><td>회수</td></tr>
+</table>
+
+<h3>프로젝트 / 이슈 / 스레드</h3>
+<table>
+    <tr><th>Endpoint</th><th>용도</th></tr>
+    <tr><td><code>POST /api/comm/getprojects</code></td><td>프로젝트 목록</td></tr>
+    <tr><td><code>POST /api/comm/createproject</code></td><td>프로젝트 생성</td></tr>
+    <tr><td><code>POST /api/comm/createissue</code></td><td>이슈 생성</td></tr>
+    <tr><td><code>POST /api/comm/updateissue</code></td><td>이슈 수정</td></tr>
+    <tr><td><code>POST /api/comm/deleteissue</code></td><td>이슈 삭제</td></tr>
+    <tr><td><code>POST /api/comm/getchatthread</code></td><td>말풍선 스레드 조회</td></tr>
+    <tr><td><code>POST /api/comm/createchatthread</code></td><td>말풍선 스레드 생성</td></tr>
+    <tr><td><code>POST /api/comm/createissuethread</code></td><td>이슈 스레드 생성</td></tr>
+    <tr><td><code>POST /api/comm/getthreadcomments</code></td><td>스레드 댓글 목록</td></tr>
+    <tr><td><code>POST /api/comm/addthreadcomment</code></td><td>스레드 댓글 작성</td></tr>
+    <tr><td><code>POST /api/comm/deletethreadcomment</code></td><td>스레드 댓글 삭제</td></tr>
+</table>
+
+<h3>알림 / 상태 / 파일</h3>
+<table>
+    <tr><th>Endpoint</th><th>용도</th></tr>
+    <tr><td><code>POST /api/noti/syncnoti</code></td><td>알림 sync</td></tr>
+    <tr><td><code>POST /api/noti/readnoti</code></td><td>알림 읽음</td></tr>
+    <tr><td><code>POST /api/status/setpresence</code></td><td>presence 변경</td></tr>
+    <tr><td><code>POST /api/status/subscribe</code></td><td>presence 구독</td></tr>
+    <tr><td><code>POST /api/media/file/upload</code></td><td>파일 업로드 (multipart)</td></tr>
+    <tr><td><code>POST /api/media/photo/upload</code></td><td>프로필 사진 업로드</td></tr>
+</table>
+
+<h2>6. 범용 NeoSend / apiPost</h2>
+
+<p>SPA가 전용 핸들러가 없는 임의의 경로를 호출할 때 사용. <code>NeoSendHandler</code>가 <code>/api/{path}</code>로 POST 후 응답을 그대로 Web에 전달.</p>
+
+<pre><code class="language-javascript">// JS 측
+await Bridge.apiPost('/comm/getprojects', {userId: 'u1'});
+await Bridge.neoSend('SendChat', {channelCode, contents});
+await Bridge.httpRequest('GET', 'https://...', headers);</code></pre>
+
+<h2>7. 개발 주의</h2>
+<div class="callout warn">
+    <ul>
+        <li>SSL 검증 비활성화 (Trust Manager stub) — 배포 전 정책 결정 필요</li>
+        <li>Retrofit이 아닌 <code>postJson</code>으로 대부분 호출 — 타입 안전성이 약함</li>
+        <li>에러 응답은 <code>{errorCode:N, errorMessage:"..."}</code> 포맷. N=0 이 성공</li>
+    </ul>
+</div>
+
+<div class="page-nav">
+    <a href="../data/common-setting.html" class="prev">common / setting</a>
+    <a href="binary.html" class="next">Binary Protocol</a>
+</div>
+
+</main></div></body></html>

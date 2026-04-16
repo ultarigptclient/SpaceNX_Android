@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+
+    <style name="Theme.HybridWebMessenger" parent="Theme.MaterialComponents.Light.NoActionBar" />
+
+    <style name="Theme.HybridWebMessenger.Splash" parent="Theme.HybridWebMessenger">
+        <item name="android:windowBackground">@color/splashBack</item>
+    </style>
+</resources>

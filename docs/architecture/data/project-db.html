@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head><meta charset="UTF-8"><title>project.db — Hybrid-Talk v2</title>
+<link rel="stylesheet" href="../assets/style.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/kotlin.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<script>mermaid.initialize({startOnLoad:true,theme:'dark'});window.addEventListener('DOMContentLoaded',()=>hljs.highlightAll());</script>
+</head><body><div class="layout">
+
+<aside class="sidebar">
+    <h1>Hybrid-Talk v2</h1>
+    <div class="group"><div class="group-title">Overview</div><nav>
+        <a href="../index.html">시작하기</a><a href="../01-overview.html">전체 흐름도</a><a href="../02-communication.html">통신 구조</a>
+    </nav></div>
+    <div class="group"><div class="group-title">Architecture</div><nav>
+        <a href="../03-session-login.html">세션 &amp; 로그인</a><a href="../04-di.html">DI</a>
+        <a href="../05-bridge-handlers.html">Bridge &amp; Handlers</a><a href="../06-data-layer.html">Data Layer</a>
+    </nav></div>
+    <div class="group"><div class="group-title">Data</div><nav>
+        <a href="index.html">DB 개요 &amp; ER</a><a href="org-db.html">org.db</a>
+        <a href="chat-db.html">chat.db</a><a href="message-db.html">message.db</a>
+        <a href="noti-db.html">noti.db</a><a href="project-db.html" class="active">project.db</a>
+        <a href="common-setting.html">common / setting</a>
+    </nav></div>
+    <div class="group"><div class="group-title">API</div><nav>
+        <a href="../api/rest.html">REST API</a><a href="../api/binary.html">Binary Protocol</a>
+    </nav></div>
+    <div class="group"><div class="group-title">Flows</div><nav>
+        <a href="../flows/login.html">로그인</a><a href="../flows/initial-sync.html">초기 Sync</a>
+        <a href="../flows/chat-send.html">채팅 송수신</a><a href="../flows/push-event.html">Push 이벤트</a>
+        <a href="../flows/thread.html">말풍선↔스레드</a>
+    </nav></div>
+</aside>
+
+<main class="content">
+<h1>project.db <span class="chip">프로젝트 · 이슈 · 스레드 · 답글</span></h1>
+<p class="lead">
+    가장 엔티티가 많은 DB. 프로젝트/이슈/할일/캘린더/스레드/댓글을 통합 관리.
+    핵심 포인트는 <strong>ChatThread와 IssueThread가 ThreadCommentEntity를 공유</strong>한다는 점.
+    파일: <code>project_{userId}.db</code>. 정의: <code>ProjectDatabase.kt</code>
+</p>
+
+<h2>엔티티 목록</h2>
+<table>
+    <tr><th>Entity</th><th>테이블</th><th>PK</th><th>역할</th></tr>
+    <tr><td><code>ProjectEntity</code></td><td>projects</td><td>projectCode</td><td>프로젝트 메타</td></tr>
+    <tr><td><code>ProjectChannelEntity</code></td><td>projectChannels</td><td>(projectCode, channelCode)</td><td>프로젝트 ↔ 채널 연결</td></tr>
+    <tr><td><code>ProjectMemberEntity</code></td><td>projectMembers</td><td>(projectCode, userId)</td><td>프로젝트 멤버</td></tr>
+    <tr><td><code>IssueEntity</code></td><td>issues</td><td>issueCode</td><td>이슈 (작업 관리)</td></tr>
+    <tr><td><code>IssueThreadEntity</code></td><td>issueThreads</td><td>(issueCode, threadCode)</td><td>이슈 토론 스레드</td></tr>
+    <tr><td><code>ChatThreadEntity</code></td><td>chatThreads</td><td>(chatCode, threadCode)</td><td>말풍선 토론 스레드</td></tr>
+    <tr><td><code>ThreadCommentEntity</code></td><td>threadComments</td><td>commentId</td><td>스레드 댓글 (공유 테이블)</td></tr>
+    <tr><td><code>ProjectSyncMetaEntity</code></td><td>projectSyncMeta</td><td>key</td><td>프로젝트 도메인 sync 상태</td></tr>
+</table>
+
+<h2>관계도</h2>
+<div class="mermaid">
+erDiagram
+    ProjectEntity ||--o{ ProjectMemberEntity  : "projectCode"
+    ProjectEntity ||--o{ ProjectChannelEntity : "projectCode"
+    ProjectEntity ||--o{ IssueEntity          : "projectCode"
+    ProjectChannelEntity }o--|| "channels (chat.db)" : "channelCode"
+    IssueEntity }o--o| "channels (chat.db)" : "channelCode (선택)"
+    IssueEntity ||--o| IssueThreadEntity      : "issueCode → threadCode"
+    IssueThreadEntity ||--o{ ThreadCommentEntity : "threadCode"
+    "chats (chat.db)" ||--o{ ChatThreadEntity : "chatCode → threadCode"
+    ChatThreadEntity ||--o{ ThreadCommentEntity : "threadCode"
+</div>
+
+<h2>1. ProjectEntity</h2>
+<pre><code class="language-kotlin">@Entity(tableName = "projects")
+data class ProjectEntity(
+    @PrimaryKey val projectCode: String,
+    val projectName: String = "",
+    val icon: String = "",
+    val color: String = "",
+    val projectStatus: String = "ACTIVE",   // ACTIVE / ARCHIVED
+    val ownerUserId: String = "",
+    val description: String = "",
+    val deadline: Long = 0L,
+    val modDate: Long = 0L,
+    val createdDate: Long = 0L
+)</code></pre>
+
+<h2>2. IssueEntity</h2>
+<pre><code class="language-kotlin">@Entity(tableName = "issues")
+data class IssueEntity(
+    @PrimaryKey val issueCode: String,
+    val projectCode: String = "",           // FK → ProjectEntity
+    val channelCode: String = "",           // FK → ChannelEntity (선택)
+    val title: String = "",
+    val description: String = "",
+    val issueType: String = "TASK",         // TODO / TASK / BUG / STORY / EPIC
+    val issueStatus: String = "TODO",       // TODO / IN_PROGRESS / DONE / BACKLOG
+    val priority: String = "NORMAL",        // LOW / NORMAL / HIGH / CRITICAL
+    val assigneeUserId: String = "",
+    val reporterUserId: String = "",
+    val labels: String = "",                // CSV 또는 JSON
+    val dueDate: Long = 0L,
+    val completedDate: Long = 0L,
+    val modDate: Long = 0L,
+    val createdDate: Long = 0L,
+    val threadCode: String = "",            // FK → Thread (이슈 토론)
+    val commentCount: Int = 0
+)</code></pre>
+
+<h2>3. ChatThreadEntity (말풍선 스레드)</h2>
+<pre><code class="language-kotlin">@Entity(tableName = "chatThreads", primaryKeys = ["chatCode", "threadCode"])
+data class ChatThreadEntity(
+    val chatCode: String,               // 원본 말풍선 (FK → ChatEntity)
+    val threadCode: String,             // 스레드 고유 ID
+    val channelCode: String = "",       // 소속 채널
+    val commentCount: Int = 0,
+    val createdDate: Long = 0L
+)</code></pre>
+
+<h2>4. IssueThreadEntity (이슈 스레드)</h2>
+<pre><code class="language-kotlin">@Entity(tableName = "issueThreads", primaryKeys = ["issueCode", "threadCode"])
+data class IssueThreadEntity(
+    val issueCode: String,              // FK → IssueEntity
+    val threadCode: String,
+    val commentCount: Int = 0,
+    val createdDate: Long = 0L
+)</code></pre>
+
+<h2>5. ThreadCommentEntity (공유 댓글 테이블)</h2>
+<pre><code class="language-kotlin">@Entity(tableName = "threadComments")
+data class ThreadCommentEntity(
+    @PrimaryKey val commentId: Int,     // 서버 발급 (auto increment on server)
+    val threadCode: String = "",        // FK → ChatThread 또는 IssueThread
+    val userId: String = "",
+    val contents: String = "",
+    val createdDate: Long = 0L
+)</code></pre>
+
+<div class="callout info">
+    <strong>왜 공유 테이블인가?</strong><br/>
+    댓글 UI·처리 로직이 스레드 출처(말풍선/이슈)에 관계없이 동일합니다.
+    <code>threadCode</code>로만 필터링하면 되므로 별도 테이블로 나눌 이유가 없습니다. 원본 j.png "핵심 포인트" 참고.
+</div>
+
+<h2>말풍선 → 스레드 생성 흐름</h2>
+<p>사용자가 말풍선 길게 누르기/우클릭 → "스레드로 답글" 액션:</p>
+
+<div class="mermaid">
+sequenceDiagram
+    participant UI as React ChatPage
+    participant B as Bridge
+    participant A as apiPost
+
+    UI->>UI: onThread(chatCode) 호출
+    UI->>A: Bridge.apiPost('/comm/getchatthread', {chatCode})
+    A-->>UI: 기존 스레드 있으면 {threadCode}
+    alt 없음 (첫 답글)
+        UI->>A: Bridge.apiPost('/comm/createchatthread', {chatCode, channelCode})
+        A-->>UI: {threadCode} (서버 발급)
+    end
+    UI->>A: Bridge.apiPost('/comm/addthreadcomment', {threadCode, userId, contents})
+    Note over UI: threadMap[chatCode] = commentCount<br/>말풍선에 "N개 답글" 배지 표시
+</div>
+
+<h2>이슈 생성 → 스레드 자동 생성</h2>
+<pre><code class="language-javascript">// IssuePage에서
+await Bridge.apiPost('/comm/createissue', {title, description, ...});
+// 성공 시 즉시
+await Bridge.apiPost('/comm/createissuethread', {issueCode});
+// 이후 댓글 작성은 대화 스레드와 동일
+await Bridge.apiPost('/comm/addthreadcomment', {threadCode, userId, contents});</code></pre>
+
+<figure>
+    <img src="../assets/images/g.png" alt="말풍선 스레드 흐름">
+    <figcaption>원본 — 말풍선에서 스레드 열기 흐름 + ChatThreadEntity / ThreadCommentEntity 정의</figcaption>
+</figure>
+
+<figure>
+    <img src="../assets/images/h.png" alt="IssueEntity / 이슈 생성 흐름">
+    <figcaption>원본 — IssueEntity 스펙, 이슈 생성 시 스레드 자동 생성 플로우</figcaption>
+</figure>
+
+<h2>Todo / Calendar</h2>
+<p>이 앱의 투두와 캘린더 이벤트는 현재 로컬 DB에 엔티티가 없고 REST forward로만 처리됩니다 (<code>getTodos</code>, <code>createCalEvent</code> 등). 서버 측 DB에만 존재.</p>
+
+<div class="page-nav">
+    <a href="noti-db.html" class="prev">noti.db</a>
+    <a href="common-setting.html" class="next">common / setting</a>
+</div>
+
+</main></div></body></html>

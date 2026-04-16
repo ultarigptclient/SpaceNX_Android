@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<title>01. 전체 흐름도 & 구조 — Hybrid-Talk v2</title>
+<link rel="stylesheet" href="assets/style.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/kotlin.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<script>
+    mermaid.initialize({ startOnLoad: true, theme: 'dark' });
+    window.addEventListener('DOMContentLoaded', () => hljs.highlightAll());
+</script>
+</head>
+<body>
+<div class="layout">
+
+<aside class="sidebar">
+    <h1>Hybrid-Talk v2</h1>
+    <div class="group"><div class="group-title">Overview</div><nav>
+        <a href="index.html">시작하기</a>
+        <a href="01-overview.html" class="active">전체 흐름도 &amp; 구조</a>
+        <a href="02-communication.html">통신 구조 (3축)</a>
+    </nav></div>
+    <div class="group"><div class="group-title">Architecture</div><nav>
+        <a href="03-session-login.html">세션 &amp; 로그인 흐름</a>
+        <a href="04-di.html">Dependency Injection</a>
+        <a href="05-bridge-handlers.html">Bridge &amp; Handlers</a>
+        <a href="06-data-layer.html">Data Layer &amp; Repository</a>
+    </nav></div>
+    <div class="group"><div class="group-title">Data</div><nav>
+        <a href="data/index.html">DB 개요 &amp; ER</a>
+        <a href="data/org-db.html">org.db</a>
+        <a href="data/chat-db.html">chat.db</a>
+        <a href="data/message-db.html">message.db</a>
+        <a href="data/noti-db.html">noti.db</a>
+        <a href="data/project-db.html">project.db</a>
+        <a href="data/common-setting.html">common / setting</a>
+    </nav></div>
+    <div class="group"><div class="group-title">API</div><nav>
+        <a href="api/rest.html">REST API</a>
+        <a href="api/binary.html">Binary Protocol</a>
+    </nav></div>
+    <div class="group"><div class="group-title">Flows</div><nav>
+        <a href="flows/login.html">로그인 시퀀스</a>
+        <a href="flows/initial-sync.html">초기 Sync 체인</a>
+        <a href="flows/chat-send.html">채팅 송수신</a>
+        <a href="flows/push-event.html">Push 이벤트</a>
+        <a href="flows/thread.html">말풍선↔스레드↔이슈</a>
+    </nav></div>
+</aside>
+
+<main class="content">
+
+<h1>01. 전체 흐름도 &amp; 구조</h1>
+<p class="lead">
+    앱이 실행되는 순간부터 사용자가 로그인해서 메시지를 주고받을 준비가 되기까지의 전체 흐름을,
+    코드와 원본 다이어그램을 함께 보여드립니다. 패키지 구조와 현재 알려진 개선 포인트도 여기서 정리합니다.
+</p>
+
+<h2>1. 앱 시작 ~ WebView 로드</h2>
+
+<p>아래 다이어그램은 <code>HybridWebMessengerApp.onCreate()</code>부터 <code>webView.loadUrl()</code>까지의 순서입니다.</p>
+
+<div class="mermaid">
+flowchart TD
+    A["APP START<br/>HybridWebMessengerApp.onCreate()"]
+    A --> A1["Hilt DI 초기화"]
+    A --> A2["SQLCipher passphrase 워밍업<br/>(첫 DB 접근 지연 방지)"]
+    A --> A3["FCM 토큰 사전 조회"]
+
+    A --> B["MainActivity.onCreate()"]
+    B --> B1["WebView 초기화<br/>(JS enabled, DOM storage)"]
+    B --> B2["BridgeDispatcher 생성<br/>(8개 Handler + Repository 주입)"]
+    B --> B3["WebAppBridge 등록<br/>@JavascriptInterface"]
+    B --> B4["LoginViewModel Flow 구독"]
+
+    B --> C["startProcess()"]
+    C --> C1{"저장된<br/>refreshToken + userId<br/>있음?"}
+    C1 -->|Yes| C2["loginViewModel.reconnect(userId)<br/>(비동기 선행)"]
+    C1 -->|No| C3["SPA 로드만 진행"]
+    C2 --> D["webView.loadUrl(spaUrl)<br/>WebView 로드 (병렬)"]
+    C3 --> D
+</div>
+
+<h3>관련 코드 포인트</h3>
+<pre><code class="language-kotlin">@HiltAndroidApp
+class HybridWebMessengerApp : Application() {
+    @Inject lateinit var databaseProvider: DatabaseProvider
+    @Inject lateinit var appConfig: AppConfig
+
+    override fun onCreate() {
+        super.onCreate()
+        // SQLCipher passphrase 사전 계산
+        CoroutineScope(Dispatchers.IO).launch {
+            databaseProvider.warmUpPassphrase()
+        }
+        // FCM 토큰 사전 조회
+        HybridWebMessengerFirebaseMessagingService.getToken(this) { token, _ -> }
+    }
+}</code></pre>
+
+<figure>
+    <img src="assets/images/a.png" alt="앱 시작 ~ 로그인 흐름">
+    <figcaption>원본 흐름도 — 앱 시작부터 수동/자동 로그인 분기까지</figcaption>
+</figure>
+
+<h2>2. 로그인 이후의 세션 초기화</h2>
+<p>로그인 성공 즉시 <code>LoginState.Authenticated</code>가 방출됩니다. <strong>소켓 연결을 기다리지 않고</strong> 즉시 UI를 그리기 시작하는 것이 핵심. 이후 백그라운드에서 다음이 병렬로 진행됩니다.</p>
+
+<ol>
+    <li><strong>syncConfig</strong> — <code>POST /api/auth/syncconfig</code> → 서버 엔드포인트 매핑 + 테마/스킨 적용</li>
+    <li><strong>connectSocket</strong> — Binary WebSocket 연결 + HI 핸드셰이크</li>
+</ol>
+
+<div class="callout info">
+    <strong>왜 소켓을 기다리지 않는가?</strong><br/>
+    소켓 HI 핸드셰이크는 네트워크 상황에 따라 수 초 걸릴 수 있습니다. UI가 이를 기다리면 로그인 직후 화면이 멈춰 보입니다.
+    실제로는 REST로 대부분의 초기 데이터를 가져올 수 있고, 소켓은 Push 이벤트 수신용에 가깝기 때문에 분리되어 있습니다.
+</div>
+
+<h2>3. Binary 소켓 연결 + HI 핸드셰이크</h2>
+
+<figure>
+    <img src="assets/images/b.png" alt="바이너리 소켓 연결 + HI 핸드셰이크">
+    <figcaption>BinarySocketClient 연결 → HI 프레임(0x0A01) 송신 → 세션키 수신 → TIME_REQUEST</figcaption>
+</figure>
+
+<div class="mermaid">
+sequenceDiagram
+    participant M as SocketSessionManager
+    participant C as BinarySocketClient
+    participant S as NEO Server
+
+    M->>C: connect(host, port)
+    C->>S: TLS handshake
+    C->>S: WebSocket open
+    Note over C: 3 coroutines 시작<br/>readLoop / sendLoop / keepAlive
+
+    M->>S: sendHI() — 0x0A01<br/>{userId, token(JWT), deviceType, pushToken, deviceId}
+    S-->>M: HI 응답 {errorCode:0, sessionKey, userInfo, nick, config}
+    M->>M: handleHIResponse()<br/>jwtTokenDeferred.complete()<br/>hiCompletedDeferred.complete()
+    M->>S: TIME_REQUEST (0x0A07)
+    Note over M: LoginState.LoggedIn 방출 (UI 진입 허용)
+</div>
+
+<p><strong>프레임 구조</strong>: <code>[cmd:2B][len:3B][invokeId:3B][JSON body UTF-8]</code></p>
+
+<h2>4. 로그인 후 백그라운드 Sync 병렬 흐름</h2>
+<p>세션이 열리면 여러 도메인 데이터를 서로 <strong>독립</strong>적으로(체인끼리는 순차) 동시 당깁니다. 체인 A/B는 순차(앞이 끝나면 뒤), C/D/E는 독립입니다.</p>
+
+<div class="mermaid">
+flowchart LR
+    subgraph A["체인 A (순차)"]
+        A1["syncOrg<br/>POST /api/org/syncorg"]
+        A2["syncBuddy<br/>POST /api/buddy/syncbuddy"]
+        A3["autoSubscribeUsers<br/>(Binary SUBSCRIBE)"]
+        A1 -->|orgReady| A2
+        A2 -->|buddyReady| A3
+    end
+
+    subgraph B["체인 B (순차)"]
+        B1["syncChannel<br/>POST /api/comm/syncchannel"]
+        B2["syncChat<br/>POST /api/comm/syncchat"]
+        B1 -->|channelReady| B2
+        B2 -->|chatReady| B3["완료"]
+    end
+
+    subgraph C["독립 C"]
+        C1["syncMessage<br/>POST /api/comm/syncmessage"]
+        C1 -->|messageReady| C2[" "]
+    end
+
+    subgraph D["독립 D"]
+        D1["syncNoti<br/>POST /api/noti/syncnoti"]
+        D1 -->|notiReady| D2[" "]
+    end
+
+    subgraph E["독립 E (선택)"]
+        E1["syncProject / syncIssue / syncThread"]
+    end
+</div>
+
+<figure>
+    <img src="assets/images/c.png" alt="syncOrgAndBuddy + startBackgroundSync">
+    <figcaption>원본 병렬 Sync 체인 도식 — 각 체인이 끝날 때마다 JS에 <code>xxxReady</code> 이벤트 전송</figcaption>
+</figure>
+
+<p>각 sync 단계가 끝날 때 React SPA에 상태 이벤트를 발신합니다:</p>
+<pre><code class="language-javascript">// Web 측 수신
+window.addEventListener('message', (e) => {
+    const msg = JSON.parse(e.data);
+    if (msg.event === 'orgReady') {/* 조직도 렌더 */}
+    if (msg.event === 'buddyReady') {/* 버디 목록 */}
+    if (msg.event === 'channelReady') {/* 채널 목록 */}
+    // ...
+});</code></pre>
+
+<h2>5. Bridge 통신 흐름 (실시간)</h2>
+
+<figure>
+    <img src="assets/images/d.png" alt="Android → Web 응답 / Push 흐름">
+    <figcaption>Android → Web 응답 콜백과 Push 이벤트 전달 방식</figcaption>
+</figure>
+
+<div class="mermaid">
+sequenceDiagram
+    participant JS as React SPA
+    participant B as WebAppBridge
+    participant D as BridgeDispatcher
+    participant H as Handler
+    participant R as Repository
+    participant API as REST/Socket
+
+    JS->>B: AndroidBridge.postMessage({action, ...params})
+    B->>B: JSON 파싱
+    B->>D: dispatch(action, params)
+    D->>H: handler.handleXxx(params)  (when문 라우팅)
+    H->>R: repository.xxxOperation()
+    R->>API: REST 호출 또는 Socket 프레임
+    API-->>R: 응답
+    R-->>H: 결과
+    H->>JS: resolveToJs("xxx", json)<br/>→ evalJs("window._xxxResolve('{json}')")
+
+    Note over JS,API: Push 이벤트의 경우
+    API-->>R: Binary Push 프레임 (invokeId=0)
+    R->>R: PushEventHandler.applyToLocalDb()
+    R->>JS: window.postMessage({event:"neoPush", command, data})
+</div>
+
+<h2>6. 패키지 구조</h2>
+
+<h3>현재 파일 구성</h3>
+<pre><code class="language-plaintext">net.spacenx.messenger/
+├─ HybridWebMessengerApp.kt      @HiltAndroidApp
+├─ common/
+│  ├─ AppConfig.kt               354줄 — 설정·자격증명·엔드포인트 관리 (리팩 대상)
+│  ├─ Constants.kt               메시지 타입 등
+│  └─ JsEscapeUtil.kt            JS string escape
+├─ data/
+│  ├─ local/
+│  │  ├─ DatabaseProvider.kt     6 DB 생성/open (SQLCipher passphrase 주입)
+│  │  ├─ CommonDatabase.kt       @Database common.db
+│  │  ├─ OrgDatabase.kt                   org.db
+│  │  ├─ ChatDatabase.kt                  chat.db
+│  │  ├─ MessageDatabase.kt               message.db
+│  │  ├─ NotiDatabase.kt                  noti.db
+│  │  ├─ SettingDatabase.kt               setting.db
+│  │  ├─ ProjectDatabase.kt               project.db
+│  │  ├─ dao/                    13 DAO 인터페이스
+│  │  └─ entity/                 24 Entity
+│  ├─ remote/
+│  │  ├─ api/                    7 Retrofit 인터페이스 + ApiClient
+│  │  └─ socket/                 BinarySocketClient + Codec + ProtocolCommand
+│  └─ repository/
+│     ├─ AuthRepository.kt       (511)
+│     ├─ BuddyRepository.kt
+│     ├─ ChannelRepository.kt    (908)
+│     ├─ MessageRepository.kt    (552)
+│     ├─ NotiRepository.kt
+│     ├─ OrgRepository.kt
+│     ├─ ProjectRepository.kt
+│     ├─ PubSubRepository.kt
+│     ├─ StatusRepository.kt
+│     ├─ SocketSessionManager.kt (581)
+│     ├─ PushEventHandler.kt
+│     └─ UserNameCache.kt
+├─ di/
+│  └─ AppModule.kt               Hilt @Provides — 모든 Singleton
+├─ service/
+│  ├─ SessionService.kt          전경 서비스 (앱 종료 후에도 세션 유지 시도)
+│  ├─ SyncService.kt             주기적 sync
+│  └─ push/                      FCM + 그룹 알림
+├─ ui/
+│  ├─ MainActivity.kt            (1,437 — 리팩 대상)
+│  ├─ LoginActivity.kt
+│  ├─ viewmodel/
+│  │  ├─ LoginViewModel.kt       @HiltViewModel
+│  │  └─ MainViewModel.kt
+│  ├─ bridge/
+│  │  ├─ WebAppBridge.kt         @JavascriptInterface
+│  │  ├─ BridgeDispatcher.kt     when(action) 라우팅
+│  │  ├─ BridgeContext.kt        핸들러 공통 인터페이스
+│  │  └─ handler/                8 Handler
+│  └─ call/                      LiveKit 오버레이
+└─ util/                         WebFileManager 등</code></pre>
+
+<h3>아키텍처 의도 vs 현실</h3>
+<p>원래 Clean Architecture로 패키지 구조를 잡았지만 실제 구현은 <strong>MVVM에 가깝게</strong> 수렴했습니다:</p>
+
+<table>
+    <tr><th>레이어</th><th>원래 Clean</th><th>현재 상태</th></tr>
+    <tr><td>Presentation</td><td>Activity/Fragment + ViewModel</td><td>Activity + WebView + Hilt ViewModel ✅</td></tr>
+    <tr><td>Domain</td><td>UseCase 계층</td><td>없음. Repository가 직접 Handler/ViewModel에 주입</td></tr>
+    <tr><td>Data</td><td>Repository + DataSource (Local/Remote)</td><td>Repository에 두 소스가 직접 주입됨 (DAO + ApiClient + SocketManager)</td></tr>
+</table>
+
+<div class="callout warn">
+    <strong>개선 포인트 요약</strong> (원본 이미지 d/e 기반)
+    <ol>
+        <li><strong>MainActivity 분리</strong> — <code>WebViewManager</code> / <code>PushHandlerRegistry</code> / <code>NetworkMonitor</code>로 책임 분할</li>
+        <li><strong>ChannelRepository 분할</strong> — <code>ChannelSyncRepository</code> / <code>ChatRepository</code> / <code>ChannelMemberRepository</code></li>
+        <li><strong>DI 부족</strong> — 현재 Handler들이 BridgeDispatcher에서 직접 new. Hilt <code>@Inject</code>로 전환 필요</li>
+        <li><strong>AppConfig 과다</strong> (354줄) — <code>CredentialManager</code> / <code>EndpointResolver</code> / <code>ConfigCache</code>로 책임 분리</li>
+        <li><strong>에러 처리 전략 부재</strong> — 각 Handler/Repository에서 <code>try-catch + Log.e</code>만 사용. 통합 에러 리포팅 없음</li>
+        <li><strong>테스트 전무</strong> — test dependencies 선언만 있고 실제 테스트 파일 0개</li>
+        <li><strong>configReady 3초 지연</strong> — 네이티브에서 <code>configReady=false</code> → 서버 <code>/config/get</code> 3초+ 대기. 개선 필요</li>
+    </ol>
+</div>
+
+<figure>
+    <img src="assets/images/e.png" alt="개선 포인트">
+    <figcaption>원본 개선 포인트 상세 (7개 항목)</figcaption>
+</figure>
+
+<div class="page-nav">
+    <a href="index.html" class="prev">시작하기</a>
+    <a href="02-communication.html" class="next">02. 통신 구조 (3축)</a>
+</div>
+
+</main>
+</div>
+</body>
+</html>

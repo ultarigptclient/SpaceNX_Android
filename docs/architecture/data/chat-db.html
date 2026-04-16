@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8"><title>chat.db — Hybrid-Talk v2</title>
+<link rel="stylesheet" href="../assets/style.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/kotlin.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<script>mermaid.initialize({startOnLoad:true,theme:'dark'});window.addEventListener('DOMContentLoaded',()=>hljs.highlightAll());</script>
+</head>
+<body><div class="layout">
+
+<aside class="sidebar">
+    <h1>Hybrid-Talk v2</h1>
+    <div class="group"><div class="group-title">Overview</div><nav>
+        <a href="../index.html">시작하기</a>
+        <a href="../01-overview.html">전체 흐름도</a>
+        <a href="../02-communication.html">통신 구조</a>
+    </nav></div>
+    <div class="group"><div class="group-title">Architecture</div><nav>
+        <a href="../03-session-login.html">세션 &amp; 로그인</a>
+        <a href="../04-di.html">DI</a>
+        <a href="../05-bridge-handlers.html">Bridge &amp; Handlers</a>
+        <a href="../06-data-layer.html">Data Layer</a>
+    </nav></div>
+    <div class="group"><div class="group-title">Data</div><nav>
+        <a href="index.html">DB 개요 &amp; ER</a>
+        <a href="org-db.html">org.db</a>
+        <a href="chat-db.html" class="active">chat.db</a>
+        <a href="message-db.html">message.db</a>
+        <a href="noti-db.html">noti.db</a>
+        <a href="project-db.html">project.db</a>
+        <a href="common-setting.html">common / setting</a>
+    </nav></div>
+    <div class="group"><div class="group-title">API</div><nav>
+        <a href="../api/rest.html">REST API</a>
+        <a href="../api/binary.html">Binary Protocol</a>
+    </nav></div>
+    <div class="group"><div class="group-title">Flows</div><nav>
+        <a href="../flows/login.html">로그인</a>
+        <a href="../flows/initial-sync.html">초기 Sync</a>
+        <a href="../flows/chat-send.html">채팅 송수신</a>
+        <a href="../flows/push-event.html">Push 이벤트</a>
+        <a href="../flows/thread.html">말풍선↔스레드</a>
+    </nav></div>
+</aside>
+
+<main class="content">
+
+<h1>chat.db <span class="chip">사용자별</span></h1>
+<p class="lead">
+    채팅 관련 핵심 DB. 채널(방) 메타 + 멤버 + 메시지 + 오프셋 + 이벤트 로그를 포함합니다.
+    파일명은 <code>chat_{userId}.db</code>. 정의: <code>ChatDatabase.kt</code>
+</p>
+
+<h2>엔티티 목록</h2>
+<table>
+    <tr><th>Entity</th><th>테이블</th><th>PK</th><th>역할</th></tr>
+    <tr><td><code>ChannelEntity</code></td><td>channels</td><td>channelCode</td><td>채팅방 메타</td></tr>
+    <tr><td><code>ChannelMemberEntity</code></td><td>channelMembers</td><td>(channelCode, userId)</td><td>방 참여자</td></tr>
+    <tr><td><code>ChannelOffsetEntity</code></td><td>channelOffsets</td><td>(channelCode, userId)</td><td>사용자별 읽음 오프셋</td></tr>
+    <tr><td><code>ChatEntity</code></td><td>chats</td><td>(channelCode, chatCode)</td><td>메시지 본체</td></tr>
+    <tr><td><code>ChatEventEntity</code></td><td>chatEvents</td><td>eventId</td><td>CRUD 이벤트 로그</td></tr>
+    <tr><td><code>SyncMetaEntity</code></td><td>syncMeta</td><td>key</td><td>lastSyncTime 등</td></tr>
+</table>
+
+<h2>1. ChannelEntity</h2>
+<pre><code class="language-kotlin">@Entity(tableName = "channels")
+data class ChannelEntity(
+    @PrimaryKey val channelCode: String,
+    val channelName: String = "",
+    val masterChannelName: String = "",
+    val masterUserId: String = "",          // 마스터 (방장)
+    val sendUserId: String = "",            // 최근 발신자
+    val channelType: String = "",           // DM / GROUP / CONFERENCE 등
+    val lastChatDate: Long = 0L,
+    val lastChatContents: String = "",
+    val unreadCount: Int = 0,               // 채널 배지용 (단, 최근엔 offset 기반 재계산 권장)
+    val additional: String = "{}"           // 확장 JSON (설정/메타)
+)</code></pre>
+
+<h3>채널 타입</h3>
+<table>
+    <tr><th>channelType</th><th>설명</th></tr>
+    <tr><td><code>DM</code></td><td>1:1 대화</td></tr>
+    <tr><td><code>GROUP</code></td><td>그룹 대화</td></tr>
+    <tr><td><code>CONFERENCE</code></td><td>회의 (LiveKit)</td></tr>
+</table>
+
+<h2>2. ChatEntity (말풍선)</h2>
+<pre><code class="language-kotlin">@Entity(
+    tableName = "chats",
+    primaryKeys = ["channelCode", "chatCode"],
+    indices = [
+        Index("channelCode"),
+        Index(value = ["channelCode", "sendDate"])
+    ]
+)
+data class ChatEntity(
+    val channelCode: String,
+    val chatCode: String,
+    val sendUserId: String? = null,
+    val contents: String = "",
+    val sendDate: Long = 0L,
+    val additional: String? = null,    // JSON — 리액션/투표/파일첨부 메타
+    val chatType: Int = 0,             // 메시지 유형 (0=일반, 시스템, 파일 등)
+    val systemCommand: String? = null, // 시스템 메시지 명령 (입장/퇴장 등)
+    val chatFont: String = "{}",       // 폰트 스타일 JSON
+    val state: Int = 0                 // 0=정상, -1=삭제됨
+)</code></pre>
+
+<div class="callout info">
+    <strong>답글(Reply)은 별도 엔티티가 아님</strong><br/>
+    ChatEntity에 <code>parentChatCode</code>나 <code>replyTo</code> 필드가 없습니다.
+    이 앱에서 "답글"은 스레드(ChatThreadEntity)를 통해 처리됩니다. 인라인 답글은 <code>additional</code> JSON의 메타데이터로 포함되거나, 스레드 기능으로 대체.
+</div>
+
+<h2>3. ChannelOffsetEntity (읽음 관리)</h2>
+<pre><code class="language-kotlin">@Entity(
+    tableName = "channelOffsets",
+    primaryKeys = ["channelCode", "userId"]
+)
+data class ChannelOffsetEntity(
+    val channelCode: String,
+    val userId: String,
+    val offsetDate: Long = 0L          // 이 사용자가 읽은 마지막 시각
+)</code></pre>
+
+<p><strong>Unread 계산 공식:</strong></p>
+<pre><code class="language-kotlin">// ChatDao
+@Query("""SELECT COUNT(*) FROM chats
+    WHERE channelCode = :channelCode
+      AND sendDate > :offsetDate
+      AND sendUserId != :myUserId
+      AND state = 0""")
+suspend fun countUnread(channelCode: String, offsetDate: Long, myUserId: String): Int</code></pre>
+
+<h2>4. ChannelMemberEntity</h2>
+<pre><code class="language-kotlin">@Entity(
+    tableName = "channelMembers",
+    primaryKeys = ["channelCode", "userId"]
+)
+data class ChannelMemberEntity(
+    val channelCode: String,
+    val userId: String,
+    val userName: String = "",
+    val deptName: String = "",
+    val joinDate: Long = 0L,
+    val isMaster: Boolean = false
+)</code></pre>
+
+<h2>5. ChatEventEntity (Push 로그)</h2>
+<p>서버 Push로 들어온 CRUD 이벤트를 기록. React가 나중에 <code>syncChat</code> 호출 시 이 로그를 기반으로 differential sync.</p>
+
+<h2>주요 DAO 쿼리</h2>
+<table>
+    <tr><th>Query</th><th>용도</th></tr>
+    <tr><td><code>chatDao.getRecent(channelCode, limit)</code></td><td>최근 메시지 N개 (DESC)</td></tr>
+    <tr><td><code>chatDao.getBeforeDate(channelCode, beforeDate, limit)</code></td><td>페이지네이션 (위로 스크롤)</td></tr>
+    <tr><td><code>chatDao.countUnread(...)</code></td><td>미읽음 수</td></tr>
+    <tr><td><code>channelDao.getAllSortedByLastChat()</code></td><td>채널 리스트 (최근순)</td></tr>
+    <tr><td><code>channelDao.updateUnreadCount(channelCode, count)</code></td><td>배지 갱신</td></tr>
+    <tr><td><code>channelMemberDao.getByChannel(channelCode)</code></td><td>방 참여자 목록</td></tr>
+    <tr><td><code>channelOffsetDao.get(channelCode, userId)</code></td><td>내 읽음 오프셋</td></tr>
+</table>
+
+<h2>Repository → DAO 흐름</h2>
+<div class="mermaid">
+flowchart LR
+    H[ChatHandler] --&gt; R[ChannelRepository]
+    R --&gt; SC["syncChat() — REST<br/>POST /comm/syncchat"]
+    R --&gt; DB[(chat.db)]
+    SC --&gt; DB
+    P[PushEventHandler] --&gt; DB
+    P --&gt; JS[window.postMessage neoPush]
+</div>
+
+<div class="page-nav">
+    <a href="org-db.html" class="prev">org.db</a>
+    <a href="message-db.html" class="next">message.db</a>
+</div>
+
+</main></div></body></html>

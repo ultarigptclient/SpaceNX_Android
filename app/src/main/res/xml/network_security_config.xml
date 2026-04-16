@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <!-- 디버그 빌드: 사용자 설치 인증서 신뢰 (자체 서명 인증서 허용) -->
+    <debug-overrides>
+        <trust-anchors>
+            <certificates src="system" />
+            <certificates src="user" />
+        </trust-anchors>
+    </debug-overrides>
+
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="true">125.131.105.203</domain>
+        <!--<domain includeSubdomains="true">10.0.0.112</domain>-->
+        <trust-anchors>
+            <certificates src="system" />
+            <certificates src="user" />
+        </trust-anchors>
+    </domain-config>
+</network-security-config>

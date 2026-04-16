@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<title>Hybrid-Talk v2 아키텍처 문서</title>
+<link rel="stylesheet" href="assets/style.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/kotlin.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<script>
+    mermaid.initialize({ startOnLoad: true, theme: 'dark', themeVariables: { fontFamily: '"JetBrains Mono", monospace' } });
+    window.addEventListener('DOMContentLoaded', () => { hljs.highlightAll(); });
+</script>
+</head>
+<body>
+<div class="layout">
+
+<aside class="sidebar">
+    <h1>Hybrid-Talk v2</h1>
+
+    <div class="group">
+        <div class="group-title">Overview</div>
+        <nav>
+            <a href="index.html" class="active">시작하기</a>
+            <a href="01-overview.html">전체 흐름도 &amp; 구조</a>
+            <a href="02-communication.html">통신 구조 (3축)</a>
+        </nav>
+    </div>
+
+    <div class="group">
+        <div class="group-title">Architecture</div>
+        <nav>
+            <a href="03-session-login.html">세션 &amp; 로그인 흐름</a>
+            <a href="04-di.html">Dependency Injection</a>
+            <a href="05-bridge-handlers.html">Bridge &amp; Handlers</a>
+            <a href="06-data-layer.html">Data Layer &amp; Repository</a>
+        </nav>
+    </div>
+
+    <div class="group">
+        <div class="group-title">Data</div>
+        <nav>
+            <a href="data/index.html">DB 개요 &amp; ER 다이어그램</a>
+            <a href="data/org-db.html">org.db</a>
+            <a href="data/chat-db.html">chat.db</a>
+            <a href="data/message-db.html">message.db</a>
+            <a href="data/noti-db.html">noti.db</a>
+            <a href="data/project-db.html">project.db</a>
+            <a href="data/common-setting.html">common / setting</a>
+        </nav>
+    </div>
+
+    <div class="group">
+        <div class="group-title">API</div>
+        <nav>
+            <a href="api/rest.html">REST API (Retrofit)</a>
+            <a href="api/binary.html">Binary Protocol</a>
+        </nav>
+    </div>
+
+    <div class="group">
+        <div class="group-title">Flows</div>
+        <nav>
+            <a href="flows/login.html">로그인 시퀀스</a>
+            <a href="flows/initial-sync.html">초기 Sync 체인</a>
+            <a href="flows/chat-send.html">채팅 송수신</a>
+            <a href="flows/push-event.html">Push 이벤트</a>
+            <a href="flows/thread.html">말풍선↔스레드↔이슈</a>
+        </nav>
+    </div>
+
+    <div class="group">
+        <div class="group-title">References</div>
+        <nav>
+            <a href="../bridge-matrix.md">Bridge 매트릭스 (.md)</a>
+        </nav>
+    </div>
+</aside>
+
+<main class="content">
+
+<h1>Hybrid-Talk v2 아키텍처 문서</h1>
+<p class="lead">
+    웹앳톡(Web@Talk) Android 하이브리드 메신저의 아키텍처, 데이터 레이어, 통신 프로토콜, 주요 플로우를 한 곳에 모은 개발 문서입니다.
+    이 앱은 <strong>네이티브 Kotlin 코어</strong>가 인증·DB·소켓을 담당하고, <strong>WebView 내부 React SPA</strong>가 UI를 그리는 구조입니다.
+    둘 사이를 <strong>JavaScript Bridge</strong>로 연결합니다.
+</p>
+
+<div class="callout info">
+    <strong>처음 보신다면 이 순서로 읽으세요</strong>
+    <ol style="margin: 6px 0 0 0;">
+        <li><a href="01-overview.html">전체 흐름도 &amp; 구조</a> — 앱 시작부터 WebView 로드까지 전체 그림</li>
+        <li><a href="02-communication.html">통신 구조 (3축)</a> — Bridge / Binary Socket / REST 어떻게 쓰는지</li>
+        <li><a href="03-session-login.html">세션 &amp; 로그인 흐름</a> — 수동·자동 로그인, HI 핸드셰이크</li>
+        <li><a href="data/index.html">DB 개요 &amp; ER</a> — 6개 DB 구조, 엔티티 관계</li>
+        <li><a href="05-bridge-handlers.html">Bridge &amp; Handlers</a> — 실제 코드 작성 시 가장 자주 건드릴 부분</li>
+    </ol>
+</div>
+
+<h2>1분 요약</h2>
+<ul>
+    <li><strong>앱 타입</strong>: WebView + 네이티브 하이브리드 (React SPA를 원격 URL로 로드)</li>
+    <li><strong>빌드</strong>: Gradle 8.11.1, Kotlin 2.1.10, Java 17, compileSdk 35 / minSdk 29</li>
+    <li><strong>DI</strong>: Hilt (<code>@HiltAndroidApp</code>, <code>@AndroidEntryPoint</code>, <code>@HiltViewModel</code>)</li>
+    <li><strong>DB</strong>: Room + <strong>SQLCipher</strong> 6종 (common / org / chat / message / noti / setting / project)</li>
+    <li><strong>통신</strong>
+        <ul>
+            <li><span class="badge rest">REST</span> Retrofit + OkHttp (<code>:18019</code>)</li>
+            <li><span class="badge binary">Binary</span> 커스텀 WebSocket 프레임 프로토콜 (<code>:18000</code>)</li>
+            <li><span class="badge bridge">Bridge</span> <code>WebAppBridge.postMessage()</code> ↔ <code>window._${action}Resolve()</code></li>
+            <li><span class="badge push">Push</span> FCM + Binary Push 프레임 → <code>window.postMessage({event:"neoPush"})</code></li>
+        </ul>
+    </li>
+    <li><strong>아키텍처 의도</strong>: Clean Architecture 기반으로 패키지 설계 → 실제 구현은 MVVM에 가깝게 수렴</li>
+    <li><strong>테스트</strong>: 의존성은 선언되어 있으나 실제 테스트 파일 <strong>0개</strong> (개선 대상)</li>
+</ul>
+
+<h2>패키지 구조 한눈에 보기</h2>
+<pre><code class="language-plaintext">net.spacenx.messenger
+├─ HybridWebMessengerApp.kt      @HiltAndroidApp + SQLCipher 워밍업 + FCM 토큰
+├─ common/                       AppConfig, Constants, JsEscapeUtil
+├─ data/
+│  ├─ local/                     Room 6개 DB + DAO + Entity
+│  ├─ remote/
+│  │   ├─ api/                   Retrofit 인터페이스 (7종) + ApiClient
+│  │   └─ socket/                BinarySocketClient + Codec + ProtocolCommand
+│  └─ repository/                9개 Repository + SocketSessionManager + PushEventHandler
+├─ di/                           AppModule (Hilt @Provides)
+├─ service/                      SessionService / SyncService / push/
+├─ ui/
+│  ├─ MainActivity.kt            WebView + ViewModel + 생명주기
+│  ├─ viewmodel/                 LoginViewModel, MainViewModel
+│  ├─ bridge/                    WebAppBridge + BridgeDispatcher + handler/
+│  └─ call/                      LiveKit 오버레이
+└─ util/                         WebFileManager, helpers
+</code></pre>
+
+<h2>3축 통신 한눈에 보기</h2>
+<div class="mermaid">
+flowchart LR
+    JS["React SPA<br/>(WebView)"]
+    Bridge["WebAppBridge<br/>@JavascriptInterface"]
+    Dispatcher["BridgeDispatcher<br/>when(action)"]
+    Handler["8 Handlers<br/>App/Chat/Channel...<br/>Org/Noti/File/Msg/NeoSend"]
+    Repo["Repositories"]
+    REST["Retrofit<br/>:18019"]
+    Socket["BinarySocket<br/>:18000"]
+    Server[("NEO Server")]
+
+    JS -->|postMessage| Bridge
+    Bridge --> Dispatcher
+    Dispatcher --> Handler
+    Handler --> Repo
+    Repo --> REST
+    Repo --> Socket
+    REST <-->|HTTPS + JWT| Server
+    Socket <-->|프레임| Server
+    Server -.Push.-> Socket
+    Socket -.evalJs.-> JS
+</div>
+
+<h2>이 문서에서 다루는 범위</h2>
+<table>
+    <tr><th>카테고리</th><th>포함 내용</th></tr>
+    <tr><td>Overview</td><td>앱 시작부터 로그인 완료까지 전체 흐름, 패키지 구조, 개선 포인트</td></tr>
+    <tr><td>통신</td><td>Bridge 프로토콜, REST 엔드포인트, Binary 프레임 포맷</td></tr>
+    <tr><td>세션</td><td>로그인(수동/자동), JWT 갱신, HI 핸드셰이크, Socket 재연결</td></tr>
+    <tr><td>DI</td><td>Hilt 모듈 전체 매핑, Singleton 스코프</td></tr>
+    <tr><td>Bridge</td><td>WebAppBridge → BridgeDispatcher → Handler 라우팅, 액션 매트릭스</td></tr>
+    <tr><td>Data</td><td>6 DB 개요, 각 Entity/DAO, ER 다이어그램, 채널↔말풍선↔스레드↔이슈↔프로젝트 관계</td></tr>
+    <tr><td>API</td><td>Retrofit 인터페이스 7종, Binary ProtocolCommand 전체</td></tr>
+    <tr><td>Flows</td><td>로그인 / 초기 Sync / 채팅 송수신 / Push 이벤트 / 말풍선-스레드 시퀀스</td></tr>
+</table>
+
+<h2>이 문서가 해결하는 질문</h2>
+<ul>
+    <li>"앱이 켜지면 뭐가 제일 먼저 실행되지?" → <a href="01-overview.html">Overview</a></li>
+    <li>"왜 REST랑 소켓을 둘 다 쓰는 거야?" → <a href="02-communication.html">통신 구조</a></li>
+    <li>"자동 로그인은 어떻게 동작해?" → <a href="03-session-login.html">세션 &amp; 로그인</a></li>
+    <li>"새 브릿지 액션을 추가하려면 어디를 봐야 해?" → <a href="05-bridge-handlers.html">Bridge &amp; Handlers</a></li>
+    <li>"채팅과 이슈의 스레드가 어떻게 연결돼?" → <a href="flows/thread.html">말풍선↔스레드↔이슈</a></li>
+    <li>"DB 암호화는 어떻게 되지?" → <a href="06-data-layer.html">Data Layer</a></li>
+    <li>"Push 이벤트가 오면 뭐가 일어나?" → <a href="flows/push-event.html">Push 이벤트</a></li>
+</ul>
+
+<h2>리팩토링 대상 & 개선 포인트</h2>
+<p>현재 코드에는 몇 가지 알려진 거대 파일이 있습니다. 새로 합류한 멤버는 이 지점을 먼저 이해하면 좋습니다.</p>
+
+<table>
+    <tr><th>파일</th><th>라인 수</th><th>이슈</th></tr>
+    <tr><td><code>MainActivity.kt</code></td><td>1,437</td><td>WebView 설정·권한·생명주기·푸시 전부 집중</td></tr>
+    <tr><td><code>ChannelRepository.kt</code></td><td>908</td><td>채널 CRUD + 멤버 + sync + 채팅 조회 혼합</td></tr>
+    <tr><td><code>ChatHandler.kt</code></td><td>871</td><td>20개+ 액션이 하나의 핸들러에</td></tr>
+    <tr><td><code>SocketSessionManager.kt</code></td><td>581</td><td>연결 / HI / 토큰 / 재연결 / 프레임 라우팅</td></tr>
+    <tr><td><code>MessageRepository.kt</code></td><td>552</td><td>sync + CRUD + prefetch + mutex</td></tr>
+    <tr><td><code>AuthRepository.kt</code></td><td>511</td><td>로그인 + 토큰 + syncConfig + 소켓 연결</td></tr>
+</table>
+
+<div class="callout warn">
+    <strong>계획된 분리 방향 (참고)</strong>
+    <ul>
+        <li><code>MainActivity</code> → <code>WebViewManager</code> / <code>PushHandlerRegistry</code> / <code>NetworkMonitor</code>로 쪼개기</li>
+        <li><code>ChannelRepository</code> → <code>ChannelSyncRepository</code> / <code>ChatRepository</code> / <code>ChannelMemberRepository</code></li>
+        <li>Handler를 <code>@Inject</code> 기반으로 전환 (현재는 <code>BridgeDispatcher</code>에서 직접 생성)</li>
+        <li><code>AppConfig</code>(354줄) → <code>CredentialManager</code> / <code>EndpointResolver</code> / <code>ConfigCache</code>로 책임 분리</li>
+        <li>통합 에러 리포팅 + 테스트 하네스 추가</li>
+    </ul>
+</div>
+
+<h2>문서 유지보수</h2>
+<ul>
+    <li>이 문서 자체는 <code>docs/architecture/</code> 경로에 git 관리됨. 수정은 PR로.</li>
+    <li>Bridge 매트릭스는 <code>tools/gen-bridge-matrix.bat</code>로 자동 재생성.</li>
+    <li>코드 변경 시 가급적 해당 섹션(Flow/Bridge/DB)도 함께 업데이트 권장.</li>
+</ul>
+
+<div class="page-nav">
+    <span></span>
+    <a href="01-overview.html" class="next">01. 전체 흐름도 &amp; 구조</a>
+</div>
+
+</main>
+</div>
+</body>
+</html>

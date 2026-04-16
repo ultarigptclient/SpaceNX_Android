@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head><meta charset="UTF-8"><title>Push 이벤트 — Hybrid-Talk v2</title>
+<link rel="stylesheet" href="../assets/style.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/kotlin.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<script>mermaid.initialize({startOnLoad:true,theme:'dark'});window.addEventListener('DOMContentLoaded',()=>hljs.highlightAll());</script>
+</head><body><div class="layout">
+
+<aside class="sidebar">
+    <h1>Hybrid-Talk v2</h1>
+    <div class="group"><div class="group-title">Overview</div><nav>
+        <a href="../index.html">시작하기</a><a href="../01-overview.html">전체 흐름도</a><a href="../02-communication.html">통신 구조</a>
+    </nav></div>
+    <div class="group"><div class="group-title">Architecture</div><nav>
+        <a href="../03-session-login.html">세션 &amp; 로그인</a><a href="../04-di.html">DI</a>
+        <a href="../05-bridge-handlers.html">Bridge &amp; Handlers</a><a href="../06-data-layer.html">Data Layer</a>
+    </nav></div>
+    <div class="group"><div class="group-title">Data</div><nav>
+        <a href="../data/index.html">DB 개요 &amp; ER</a><a href="../data/org-db.html">org.db</a>
+        <a href="../data/chat-db.html">chat.db</a><a href="../data/message-db.html">message.db</a>
+        <a href="../data/noti-db.html">noti.db</a><a href="../data/project-db.html">project.db</a>
+        <a href="../data/common-setting.html">common / setting</a>
+    </nav></div>
+    <div class="group"><div class="group-title">API</div><nav>
+        <a href="../api/rest.html">REST API</a><a href="../api/binary.html">Binary Protocol</a>
+    </nav></div>
+    <div class="group"><div class="group-title">Flows</div><nav>
+        <a href="login.html">로그인</a><a href="initial-sync.html">초기 Sync</a>
+        <a href="chat-send.html">채팅 송수신</a><a href="push-event.html" class="active">Push 이벤트</a>
+        <a href="thread.html">말풍선↔스레드</a>
+    </nav></div>
+</aside>
+
+<main class="content">
+<h1>Flow: Push 이벤트 처리</h1>
+<p class="lead">
+    서버에서 오는 실시간 이벤트는 두 경로를 탑니다: <strong>앱이 실행 중일 때는 Binary Socket</strong>,
+    <strong>백그라운드/종료 상태일 때는 FCM</strong>. 둘 다 최종적으로 로컬 DB에 반영되고 (앱이 떠있으면) WebView로 전달됩니다.
+</p>
+
+<h2>1. 전체 그림</h2>
+<div class="mermaid">
+flowchart TD
+    S[("NEO Server")]
+    S -- "앱 foreground" --> SB[Binary Socket :18000]
+    S -- "앱 background/종료" --> FCM[Firebase Cloud Messaging]
+
+    SB --> SM[SocketSessionManager]
+    FCM --> FCMSvc[HybridWebMessengerFirebaseMessagingService]
+
+    SM --> PEH[PushEventHandler]
+    FCMSvc --> PEH
+
+    PEH --> DB[(로컬 DB<br/>chat/message/noti/org)]
+    PEH --> FW[forwardPushToReact]
+    PEH --> GN[GroupNotificationManager<br/>시스템 알림]
+
+    FW --> JS[window.postMessage<br/>{event:'neoPush', command, data}]
+</div>
+
+<h2>2. Binary Socket Push 경로</h2>
+
+<p><code>invokeId == 0</code>인 프레임은 Push 이벤트로 분류되어 <code>PushEventHandler</code>로 라우팅됩니다.</p>
+
+<div class="mermaid">
+sequenceDiagram
+    participant S as Server
+    participant C as BinarySocketClient
+    participant SM as SocketSessionManager
+    participant PEH as PushEventHandler
+    participant DB
+    participant Web as WebView
+    participant GN as GroupNotificationManager
+
+    S-->>C: [cmd:2B][len:3B][invokeId=0][body]
+    C->>SM: onMessage(cmd, body)
+    SM->>SM: ProtocolCommand.isPushEvent(cmd) == true
+    SM->>PEH: handlePushEvent(cmd, body)
+
+    alt 채팅 이벤트 (0x0280~0x028F)
+        PEH->>PEH: handleSendChatEvent(data)
+        PEH->>DB: chatDao.upsert + channelDao.updateLast
+        PEH->>Web: forwardPushToReact("SendChatEvent", data)
+        opt activeChannelCode ≠ 받은 채널
+            PEH->>GN: 시스템 알림 표시<br/>(인앱 알림 억제)
+        end
+    else Org 이벤트 (0x0380~0x0383)
+        PEH->>DB: userDao / deptDao upsert
+        PEH->>Web: forwardPushToReact("OrgUserEvent", data)
+    else Presence (0x0680 ICON_EVENT)
+        PEH->>Web: _onPresenceUpdate(data)
+    else 기타 (알림, 쪽지, 프로젝트, ...)
+        PEH->>DB: 해당 DB 업데이트
+        PEH->>Web: forwardPushToReact(command, data)
+    end
+</div>
+
+<h2>3. FCM 경로 (앱 백그라운드)</h2>
+
+<div class="mermaid">
+sequenceDiagram
+    participant S as Server
+    participant FCM
+    participant Svc as HybridWebMessenger<br/>FirebaseMessagingService
+    participant DB
+    participant SN as 시스템 알림
+    participant App as 앱 재진입
+
+    S->>FCM: 메시지 전송
+    FCM->>Svc: onMessageReceived(remoteMessage)
+
+    alt 앱 프로세스 alive (Service + Binary 아직 연결됨)
+        Svc->>Svc: 중복 방지 (Binary로 이미 처리됨)
+    else 앱 종료됨
+        Svc->>DB: 로컬 DB 업데이트 (가능한 범위)
+        Svc->>SN: 시스템 트레이 알림 생성
+    end
+
+    SN->>App: 사용자 탭 → 앱 실행
+    App->>App: 자동 로그인 → 소켓 연결 → Push 수신 재개
+</div>
+
+<h2>4. PushEventHandler 분기 구조</h2>
+
+<pre><code class="language-kotlin">class PushEventHandler(
+    private val dbProvider: DatabaseProvider,
+    private val channelRepo: ChannelRepository,
+    private val messageRepo: MessageRepository,
+    private val notiRepo: NotiRepository,
+    private val appConfig: AppConfig
+) {
+    suspend fun handlePushEvent(command: Int, data: JSONObject) {
+        when (command) {
+            ProtocolCommand.SEND_CHAT_EVENT.code      -&gt; handleSendChatEvent(data)
+            ProtocolCommand.READ_CHAT_EVENT.code      -&gt; handleReadChatEvent(data)
+            ProtocolCommand.DELETE_CHAT_EVENT.code    -&gt; handleDeleteChatEvent(data)
+            ProtocolCommand.MOD_CHAT_EVENT.code       -&gt; handleModChatEvent(data)
+            ProtocolCommand.REACTION_CHAT_EVENT.code  -&gt; handleReactionChatEvent(data)
+
+            ProtocolCommand.SEND_MESSAGE_EVENT.code   -&gt; handleSendMessageEvent(data)
+            ProtocolCommand.RETRIEVE_MESSAGE_EVENT.code -&gt; handleRetrieveMessageEvent(data)
+
+            ProtocolCommand.NOTIFY_EVENT.code,
+            ProtocolCommand.NOTIFICATION_EVENT.code   -&gt; handleNotifyEvent(data)
+
+            ProtocolCommand.ICON_EVENT.code           -&gt; handleIconEvent(data)
+
+            ProtocolCommand.ORG_USER_EVENT.code,
+            ProtocolCommand.ORG_DEPT_EVENT.code       -&gt; handleOrgEvent(command, data)
+
+            // ... 30+ 이벤트 타입
+        }
+    }
+}</code></pre>
+
+<h2>5. Web으로 전달되는 메시지 포맷</h2>
+
+<pre><code class="language-javascript">// 일반 Push 이벤트
+{
+    event: "neoPush",
+    command: "SendChatEvent",    // ProtocolCommand.protocol
+    data: {
+        channelCode: "C1",
+        chatCode: "CH123",
+        sendUserId: "u1",
+        contents: "...",
+        sendDate: 1712345678000,
+        additional: null
+    }
+}
+
+// Presence 업데이트
+{
+    users: [
+        {userId: "u1", icon: 1, command: "ICON_PC"},
+        {userId: "u2", mobileIcon: 2}
+    ]
+}
+// → window._onPresenceUpdate(json) 호출
+
+// 연결 상태
+{event: "neoConnected"} / {event: "neoDisconnected"}</code></pre>
+
+<h2>6. 인앱 알림 억제</h2>
+
+<p>사용자가 현재 보고 있는 채널에는 시스템 알림을 띄우지 않습니다:</p>
+
+<pre><code class="language-kotlin">private suspend fun handleSendChatEvent(data: JSONObject) {
+    val channelCode = data.optString("channelCode")
+    // DB 반영
+    dbProvider.getChatDatabase().chatDao().upsert(ChatEntity.fromJson(data))
+
+    // React로 전달 (항상)
+    forwardPushToReact("SendChatEvent", data)
+
+    // 시스템 알림은 활성 채널이 아닐 때만
+    if (ctx.activeChannelCode != channelCode) {
+        val isMuted = appConfig.isChannelMuted(channelCode)
+        if (!isMuted) {
+            groupNotificationManager.show(channelCode, senderName, contents)
+        }
+    }
+}</code></pre>
+
+<p><code>activeChannelCode</code>는 Bridge <code>focusChannel</code>/<code>setActiveChannel</code> 액션으로 React가 갱신합니다.</p>
+
+<h2>7. additional null 방지 (React crash 방지)</h2>
+<pre><code class="language-kotlin">fun forwardPushToReact(command: String, data: JSONObject) {
+    // React에서 null.fileName 접근으로 크래시 방지
+    if (!data.has("additional")) data.put("additional", JSONObject())
+    val pushMsg = JSONObject()
+        .put("event", "neoPush")
+        .put("command", command)
+        .put("data", data)
+    evalJsMain("window.postMessage('${esc(pushMsg.toString())}')")
+}</code></pre>
+
+<div class="page-nav">
+    <a href="chat-send.html" class="prev">채팅 송수신</a>
+    <a href="thread.html" class="next">말풍선 ↔ 스레드</a>
+</div>
+
+</main></div></body></html>

@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head><meta charset="UTF-8"><title>초기 Sync 체인 — Hybrid-Talk v2</title>
+<link rel="stylesheet" href="../assets/style.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/kotlin.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<script>mermaid.initialize({startOnLoad:true,theme:'dark'});window.addEventListener('DOMContentLoaded',()=>hljs.highlightAll());</script>
+</head><body><div class="layout">
+
+<aside class="sidebar">
+    <h1>Hybrid-Talk v2</h1>
+    <div class="group"><div class="group-title">Overview</div><nav>
+        <a href="../index.html">시작하기</a><a href="../01-overview.html">전체 흐름도</a><a href="../02-communication.html">통신 구조</a>
+    </nav></div>
+    <div class="group"><div class="group-title">Architecture</div><nav>
+        <a href="../03-session-login.html">세션 &amp; 로그인</a><a href="../04-di.html">DI</a>
+        <a href="../05-bridge-handlers.html">Bridge &amp; Handlers</a><a href="../06-data-layer.html">Data Layer</a>
+    </nav></div>
+    <div class="group"><div class="group-title">Data</div><nav>
+        <a href="../data/index.html">DB 개요 &amp; ER</a><a href="../data/org-db.html">org.db</a>
+        <a href="../data/chat-db.html">chat.db</a><a href="../data/message-db.html">message.db</a>
+        <a href="../data/noti-db.html">noti.db</a><a href="../data/project-db.html">project.db</a>
+        <a href="../data/common-setting.html">common / setting</a>
+    </nav></div>
+    <div class="group"><div class="group-title">API</div><nav>
+        <a href="../api/rest.html">REST API</a><a href="../api/binary.html">Binary Protocol</a>
+    </nav></div>
+    <div class="group"><div class="group-title">Flows</div><nav>
+        <a href="login.html">로그인</a><a href="initial-sync.html" class="active">초기 Sync</a>
+        <a href="chat-send.html">채팅 송수신</a><a href="push-event.html">Push 이벤트</a>
+        <a href="thread.html">말풍선↔스레드</a>
+    </nav></div>
+</aside>
+
+<main class="content">
+<h1>Flow: 초기 Sync 체인</h1>
+<p class="lead">
+    로그인 직후 <code>LoginState.Authenticated</code> 방출 즉시 여러 도메인을 병렬로 sync합니다.
+    체인 A/B는 순차, 체인 C/D/E는 완전 독립입니다.
+</p>
+
+<h2>Sync 체인 구조</h2>
+<div class="mermaid">
+flowchart TB
+    Auth["LoginState.Authenticated"] --> S["syncOrgAndBuddy()<br/>+ startBackgroundSync()"]
+
+    S --> A1
+    S --> B1
+    S --> C1
+    S --> D1
+    S --> E1
+
+    subgraph ChainA["체인 A: 조직/버디 (순차)"]
+        direction TB
+        A1["syncOrg()<br/>POST /api/org/syncorg"]
+        A2["JS: window.postMessage({event:'orgReady'})"]
+        A3["syncBuddy()<br/>POST /api/buddy/syncbuddy"]
+        A4["JS: buddyReady"]
+        A5["autoSubscribeUsers()<br/>Binary SUBSCRIBE 0x0902"]
+        A1-->A2-->A3-->A4-->A5
+    end
+
+    subgraph ChainB["체인 B: 채널/채팅 (순차)"]
+        direction TB
+        B1["syncChannel()<br/>POST /api/comm/syncchannel"]
+        B2["JS: channelReady"]
+        B3["syncChat()<br/>POST /api/comm/syncchat"]
+        B4["JS: chatReady"]
+        B1-->B2-->B3-->B4
+    end
+
+    subgraph ChainC["독립 C: 쪽지"]
+        C1["syncMessage()<br/>POST /api/comm/syncmessage"]
+        C2["JS: messageReady"]
+        C1-->C2
+    end
+
+    subgraph ChainD["독립 D: 알림"]
+        D1["syncNoti()<br/>POST /api/noti/syncnoti"]
+        D2["JS: notiReady"]
+        D1-->D2
+    end
+
+    subgraph ChainE["독립 E: 프로젝트 (선택)"]
+        E1["syncProject / syncIssue / syncThread"]
+    end
+</div>
+
+<h2>왜 분리되어 있는가?</h2>
+<ul>
+    <li><strong>체인 A는 순차</strong>: 조직도 없이 버디 목록 표시 불가 → 순서 보장 필요</li>
+    <li><strong>체인 B는 순차</strong>: 채널 없이 채팅 메시지 sync 불가</li>
+    <li><strong>C/D/E는 독립</strong>: 다른 데이터와 의존관계 없음. 가장 먼저 끝난 것부터 UI 반영</li>
+</ul>
+
+<h2>각 단계 상세</h2>
+
+<h3>syncOrg</h3>
+<pre><code class="language-kotlin">// OrgRepository.syncOrg()
+val body = JSONObject().apply {
+    put("userId", userId)
+    put("lastSyncTime", syncMetaDao.get("org_last_sync_time")?.value?.toLongOrNull() ?: 0L)
+}
+val response = ApiClient.postJson(appConfig.getEndpointByPath("/org/syncorg"), body, token)
+
+// 응답 처리
+val depts  = response.optJSONArray("depts")
+val users  = response.optJSONArray("users")
+deptDao.insertAll(depts.toEntities())
+userDao.insertAll(users.toEntities())
+syncMetaDao.upsert(SyncMetaEntity("org_last_sync_time", response.optLong("lastSyncTime").toString()))
+
+// React에 알림
+ctx.notifyReact("orgReady")</code></pre>
+
+<h3>syncChannel → syncChat</h3>
+<p><code>syncChannel</code> 완료 후에만 <code>syncChat</code> 실행. <code>syncChat</code>은 채널별로 최근 N개 메시지만 가져옴 (lazy loading).</p>
+
+<h3>autoSubscribeUsers (Binary)</h3>
+<p>버디 목록 + 최근 채널 멤버의 프레즌스를 구독:</p>
+<pre><code class="language-kotlin">// PubSubRepository
+val body = JSONObject().apply {
+    put("topic", JSONArray(listOf("INFO", "NICK", "ICON_PC", "ICON_MOBILE")))
+    put("targetList", JSONArray(userIds))
+}
+sessionManager.sendFrame(ProtocolCommand.SUBSCRIBE.code, body.toString().toByteArray())</code></pre>
+
+<h2>React 측 이벤트 수신</h2>
+<pre><code class="language-javascript">// SPA 어디서나
+window.addEventListener('message', (e) =&gt; {
+    const msg = typeof e.data === 'string' ? JSON.parse(e.data) : e.data;
+    switch (msg.event) {
+        case 'orgReady':     dispatch(loadOrgTree());     break;
+        case 'buddyReady':   dispatch(loadBuddyList());   break;
+        case 'channelReady': dispatch(loadChannels());    break;
+        case 'chatReady':    dispatch(loadRecentChats()); break;
+        case 'messageReady': dispatch(loadMessages());    break;
+        case 'notiReady':    dispatch(loadNotis());       break;
+    }
+});</code></pre>
+
+<h2>재시도/실패 처리</h2>
+<ul>
+    <li>각 sync는 try-catch + <code>Log.e</code>. 실패해도 앱은 계속 동작</li>
+    <li>3회 연속 실패 시 sync 정지 (React 측 배지가 "오프라인 상태" 표시)</li>
+    <li>소켓 재연결 시 자동으로 재동기화 시작</li>
+</ul>
+
+<figure>
+    <img src="../assets/images/c.png" alt="Sync 병렬 체인">
+    <figcaption>원본 — 병렬 Sync 체인 A/B/C/D/E</figcaption>
+</figure>
+
+<div class="page-nav">
+    <a href="login.html" class="prev">로그인</a>
+    <a href="chat-send.html" class="next">채팅 송수신</a>
+</div>
+
+</main></div></body></html>

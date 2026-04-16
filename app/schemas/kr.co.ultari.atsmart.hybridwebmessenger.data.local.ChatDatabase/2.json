@@ -1,0 +1,351 @@
+{
+  "formatVersion": 1,
+  "database": {
+    "version": 2,
+    "identityHash": "083060309bb19458b4e7301a5ce4a038",
+    "entities": [
+      {
+        "tableName": "channels",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`channelCode` TEXT NOT NULL, `channelName` TEXT NOT NULL, `masterChannelName` TEXT NOT NULL, `masterUserId` TEXT NOT NULL, `sendUserId` TEXT NOT NULL, `channelType` TEXT NOT NULL, `lastChatDate` INTEGER NOT NULL, `lastChatContents` TEXT NOT NULL, `unreadCount` INTEGER NOT NULL, `additional` TEXT NOT NULL, PRIMARY KEY(`channelCode`))",
+        "fields": [
+          {
+            "fieldPath": "channelCode",
+            "columnName": "channelCode",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "channelName",
+            "columnName": "channelName",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "masterChannelName",
+            "columnName": "masterChannelName",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "masterUserId",
+            "columnName": "masterUserId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sendUserId",
+            "columnName": "sendUserId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "channelType",
+            "columnName": "channelType",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "lastChatDate",
+            "columnName": "lastChatDate",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "lastChatContents",
+            "columnName": "lastChatContents",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "unreadCount",
+            "columnName": "unreadCount",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "additional",
+            "columnName": "additional",
+            "affinity": "TEXT",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "channelCode"
+          ]
+        },
+        "indices": [],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "channelMembers",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`channelCode` TEXT NOT NULL, `userId` TEXT NOT NULL, `registDate` INTEGER NOT NULL, `unregistDate` INTEGER, PRIMARY KEY(`channelCode`, `userId`))",
+        "fields": [
+          {
+            "fieldPath": "channelCode",
+            "columnName": "channelCode",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "userId",
+            "columnName": "userId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "registDate",
+            "columnName": "registDate",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "unregistDate",
+            "columnName": "unregistDate",
+            "affinity": "INTEGER",
+            "notNull": false
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "channelCode",
+            "userId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_channelMembers_channelCode",
+            "unique": false,
+            "columnNames": [
+              "channelCode"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_channelMembers_channelCode` ON `${TABLE_NAME}` (`channelCode`)"
+          }
+        ],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "channelOffsets",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`channelCode` TEXT NOT NULL, `userId` TEXT NOT NULL, `offsetDate` INTEGER NOT NULL, PRIMARY KEY(`channelCode`, `userId`))",
+        "fields": [
+          {
+            "fieldPath": "channelCode",
+            "columnName": "channelCode",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "userId",
+            "columnName": "userId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "offsetDate",
+            "columnName": "offsetDate",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "channelCode",
+            "userId"
+          ]
+        },
+        "indices": [],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "chats",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`channelCode` TEXT NOT NULL, `chatCode` TEXT NOT NULL, `sendUserId` TEXT, `contents` TEXT NOT NULL, `sendDate` INTEGER NOT NULL, `additional` TEXT, `chatType` INTEGER NOT NULL, `systemCommand` TEXT, `chatFont` TEXT NOT NULL, `state` INTEGER NOT NULL, PRIMARY KEY(`channelCode`, `chatCode`))",
+        "fields": [
+          {
+            "fieldPath": "channelCode",
+            "columnName": "channelCode",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "chatCode",
+            "columnName": "chatCode",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sendUserId",
+            "columnName": "sendUserId",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "contents",
+            "columnName": "contents",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sendDate",
+            "columnName": "sendDate",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "additional",
+            "columnName": "additional",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "chatType",
+            "columnName": "chatType",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "systemCommand",
+            "columnName": "systemCommand",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "chatFont",
+            "columnName": "chatFont",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "state",
+            "columnName": "state",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "channelCode",
+            "chatCode"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_chats_channelCode",
+            "unique": false,
+            "columnNames": [
+              "channelCode"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_chats_channelCode` ON `${TABLE_NAME}` (`channelCode`)"
+          },
+          {
+            "name": "index_chats_channelCode_sendDate",
+            "unique": false,
+            "columnNames": [
+              "channelCode",
+              "sendDate"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_chats_channelCode_sendDate` ON `${TABLE_NAME}` (`channelCode`, `sendDate`)"
+          }
+        ],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "chatEvents",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`eventId` INTEGER NOT NULL, `command` TEXT NOT NULL, `channelCode` TEXT NOT NULL, `chatCode` TEXT NOT NULL, `sendUserId` TEXT NOT NULL, `sendDate` INTEGER NOT NULL, PRIMARY KEY(`eventId`))",
+        "fields": [
+          {
+            "fieldPath": "eventId",
+            "columnName": "eventId",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "command",
+            "columnName": "command",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "channelCode",
+            "columnName": "channelCode",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "chatCode",
+            "columnName": "chatCode",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sendUserId",
+            "columnName": "sendUserId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sendDate",
+            "columnName": "sendDate",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "eventId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_chatEvents_channelCode",
+            "unique": false,
+            "columnNames": [
+              "channelCode"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_chatEvents_channelCode` ON `${TABLE_NAME}` (`channelCode`)"
+          }
+        ],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "syncMeta",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`key` TEXT NOT NULL, `value` INTEGER NOT NULL, PRIMARY KEY(`key`))",
+        "fields": [
+          {
+            "fieldPath": "key",
+            "columnName": "key",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "value",
+            "columnName": "value",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "key"
+          ]
+        },
+        "indices": [],
+        "foreignKeys": []
+      }
+    ],
+    "views": [],
+    "setupQueries": [
+      "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '083060309bb19458b4e7301a5ce4a038')"
+    ]
+  }
+}

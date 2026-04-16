@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/rootLayout"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent">
+
+    <WebView
+        android:id="@+id/webView"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent" />
+
+    <!-- 채팅/쪽지 서브 페이지 오버레이 WebView (메인 SPA 위에 표시) -->
+    <WebView
+        android:id="@+id/subWebView"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:visibility="gone" />
+
+    <!-- NHM-70: foreground 인앱 알림 배너 (WebView 위 오버레이) -->
+    <net.spacenx.messenger.ui.InAppBannerView
+        android:id="@+id/inAppBanner"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:visibility="gone" />
+
+</FrameLayout>

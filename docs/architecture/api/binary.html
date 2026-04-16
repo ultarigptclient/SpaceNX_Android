@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head><meta charset="UTF-8"><title>Binary Protocol — Hybrid-Talk v2</title>
+<link rel="stylesheet" href="../assets/style.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/kotlin.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<script>mermaid.initialize({startOnLoad:true,theme:'dark'});window.addEventListener('DOMContentLoaded',()=>hljs.highlightAll());</script>
+</head><body><div class="layout">
+
+<aside class="sidebar">
+    <h1>Hybrid-Talk v2</h1>
+    <div class="group"><div class="group-title">Overview</div><nav>
+        <a href="../index.html">시작하기</a><a href="../01-overview.html">전체 흐름도</a><a href="../02-communication.html">통신 구조</a>
+    </nav></div>
+    <div class="group"><div class="group-title">Architecture</div><nav>
+        <a href="../03-session-login.html">세션 &amp; 로그인</a><a href="../04-di.html">DI</a>
+        <a href="../05-bridge-handlers.html">Bridge &amp; Handlers</a><a href="../06-data-layer.html">Data Layer</a>
+    </nav></div>
+    <div class="group"><div class="group-title">Data</div><nav>
+        <a href="../data/index.html">DB 개요 &amp; ER</a><a href="../data/org-db.html">org.db</a>
+        <a href="../data/chat-db.html">chat.db</a><a href="../data/message-db.html">message.db</a>
+        <a href="../data/noti-db.html">noti.db</a><a href="../data/project-db.html">project.db</a>
+        <a href="../data/common-setting.html">common / setting</a>
+    </nav></div>
+    <div class="group"><div class="group-title">API</div><nav>
+        <a href="rest.html">REST API</a><a href="binary.html" class="active">Binary Protocol</a>
+    </nav></div>
+    <div class="group"><div class="group-title">Flows</div><nav>
+        <a href="../flows/login.html">로그인</a><a href="../flows/initial-sync.html">초기 Sync</a>
+        <a href="../flows/chat-send.html">채팅 송수신</a><a href="../flows/push-event.html">Push 이벤트</a>
+        <a href="../flows/thread.html">말풍선↔스레드</a>
+    </nav></div>
+</aside>
+
+<main class="content">
+<h1>Binary Protocol</h1>
+<p class="lead">
+    서버와의 실시간 통신 채널. WebSocket 위에 커스텀 바이너리 프레임을 사용합니다.
+    서버 <code>ProtocolCommand.java</code>와 동일한 코드 맵을 Android가 <code>ProtocolCommand.kt</code>로 미러링합니다.
+</p>
+
+<h2>1. 프레임 구조</h2>
+
+<pre><code class="language-plaintext">┌─ 2 bytes ─┐┌─ 3 bytes ─┐┌─ 3 bytes ─┐┌─── N bytes ───┐
+│  command  ││   length  ││  invokeId ││  JSON body    │
+│  (Big-E)  ││   (Big-E) ││   (Big-E) ││  UTF-8        │
+└───────────┘└───────────┘└───────────┘└───────────────┘
+   0x0201        body length   요청 ID      {"...":"..."}
+   (SendChat)                  (Push=0)</code></pre>
+
+<ul>
+    <li><code>command</code> — <code>ProtocolCommand.code</code> (2 bytes). 0x0101=Login, 0x0A01=HI, 0x0280=SendChatEvent ...</li>
+    <li><code>length</code> — body 길이 (3 bytes)</li>
+    <li><code>invokeId</code> — 요청-응답 매칭용 (3 bytes). <strong>Push는 0</strong></li>
+    <li><code>body</code> — UTF-8 JSON 문자열</li>
+</ul>
+
+<h3>인코딩/디코딩 파일</h3>
+<ul>
+    <li><code>BinaryFrameCodec.kt</code> — encode/decode</li>
+    <li><code>BinarySocketClient.kt</code> — OkHttp WebSocket + coroutine loops</li>
+    <li><code>SocketSessionManager.kt</code> — 세션 관리 (581줄)</li>
+    <li><code>ProtocolCommand.kt</code> — enum (100+ 명령)</li>
+</ul>
+
+<h2>2. 요청/응답 매칭</h2>
+<div class="mermaid">
+sequenceDiagram
+    participant R as Repository
+    participant M as SocketSessionManager
+    participant S as Server
+
+    R->>M: sendFrame(cmd, body)
+    M->>M: id = ++invokeId
+    M->>M: pending[id] = CompletableDeferred()
+    M->>S: [cmd][len][id][body]
+
+    S-->>M: [cmd][len][id][body]
+    M->>M: pending[id].complete(body)
+    M-->>R: await() → body
+
+    Note over S,M: Push (invokeId=0)
+    S-->>M: [cmd][len][0][body]
+    M->>M: isPushEvent(cmd) → PushEventHandler
+</div>
+
+<h2>3. 명령 코드 전체 매핑</h2>
+
+<h3>Auth (0x01xx)</h3>
+<table>
+    <tr><th>Code</th><th>Name</th><th>용도</th></tr>
+    <tr><td><code>0x0101</code></td><td>LOGIN</td><td>로그인 (현재는 주로 REST 사용)</td></tr>
+    <tr><td><code>0x0102</code></td><td>REFRESH_TOKEN</td><td>토큰 갱신</td></tr>
+    <tr><td><code>0x0103</code></td><td>SYNC_CONFIG</td><td>서버 설정 동기화</td></tr>
+    <tr><td><code>0x0104</code></td><td>LOGOUT_CMD</td><td>로그아웃</td></tr>
+    <tr><td><code>0x0105</code></td><td>SET_CONFIG <span class="badge push">Push</span></td><td>서버가 config 변경 알림</td></tr>
+</table>
+
+<h3>Chat (0x02xx)</h3>
+<table>
+    <tr><th>Code</th><th>Name</th><th>용도</th></tr>
+    <tr><td><code>0x0201</code></td><td>SEND_CHAT</td><td>채팅 전송</td></tr>
+    <tr><td><code>0x0202</code></td><td>READ_CHAT</td><td>읽음 처리</td></tr>
+    <tr><td><code>0x0203</code></td><td>DELETE_CHAT</td><td>삭제</td></tr>
+    <tr><td><code>0x0204</code></td><td>MOD_CHAT</td><td>수정</td></tr>
+    <tr><td><code>0x0205</code></td><td>REACTION_CHAT</td><td>반응</td></tr>
+    <tr><td><code>0x0206</code></td><td>SYNC_CHAT</td><td>채팅 sync</td></tr>
+    <tr><td><code>0x0210</code></td><td>MAKE_CHANNEL</td><td>채널 생성</td></tr>
+    <tr><td><code>0x0211</code></td><td>ADD_CHANNEL_MEMBER</td><td>멤버 추가</td></tr>
+    <tr><td><code>0x0212</code></td><td>DESTROY_CHANNEL</td><td>채널 삭제</td></tr>
+    <tr><td><code>0x0213</code></td><td>REMOVE_CHANNEL_MEMBER</td><td>멤버 제거</td></tr>
+    <tr><td><code>0x0220</code></td><td>SYNC_CHANNEL</td><td>채널 sync</td></tr>
+    <tr><td><code>0x0221</code></td><td>GET_CHANNEL_INFO</td><td>채널 상세</td></tr>
+</table>
+
+<h3>Chat Events (0x028x / 0x029x) — Push (invokeId=0)</h3>
+<table>
+    <tr><th>Code</th><th>Name</th></tr>
+    <tr><td><code>0x0280</code></td><td>SEND_CHAT_EVENT</td></tr>
+    <tr><td><code>0x0281</code></td><td>READ_CHAT_EVENT</td></tr>
+    <tr><td><code>0x0282</code></td><td>DELETE_CHAT_EVENT</td></tr>
+    <tr><td><code>0x0283</code></td><td>MOD_CHAT_EVENT</td></tr>
+    <tr><td><code>0x0284</code></td><td>REACTION_CHAT_EVENT</td></tr>
+    <tr><td><code>0x0285</code></td><td>TYPING_CHAT_EVENT</td></tr>
+    <tr><td><code>0x0286</code></td><td>VOTE_EVENT</td></tr>
+    <tr><td><code>0x0287</code></td><td>CLOSE_VOTE_EVENT</td></tr>
+    <tr><td><code>0x0288</code></td><td>PIN_EVENT</td></tr>
+    <tr><td><code>0x0289</code></td><td>UNPIN_EVENT</td></tr>
+    <tr><td><code>0x028A</code></td><td>MOD_ISSUE_EVENT</td></tr>
+    <tr><td><code>0x028B</code></td><td>MOD_PROJECT_EVENT</td></tr>
+    <tr><td><code>0x028C</code></td><td>MOD_THREAD_EVENT</td></tr>
+    <tr><td><code>0x028D</code></td><td>MOD_CAL_EVENT</td></tr>
+    <tr><td><code>0x028E</code></td><td>MOD_TODO_EVENT</td></tr>
+    <tr><td><code>0x028F</code></td><td>CREATE_CHAT_THREAD_EVENT</td></tr>
+    <tr><td><code>0x0290</code></td><td>MAKE_CHANNEL_EVENT</td></tr>
+    <tr><td><code>0x0291</code></td><td>ADD_CHANNEL_MEMBER_EVENT</td></tr>
+    <tr><td><code>0x0292</code></td><td>DESTROY_CHANNEL_EVENT</td></tr>
+    <tr><td><code>0x0293</code></td><td>REMOVE_CHANNEL_MEMBER_EVENT</td></tr>
+    <tr><td><code>0x0294</code></td><td>MOD_CHANNEL_EVENT</td></tr>
+    <tr><td><code>0x0295</code></td><td>REMOVE_CHANNEL_EVENT</td></tr>
+    <tr><td><code>0x0296</code></td><td>SET_CHANNEL_EVENT</td></tr>
+    <tr><td><code>0x0297</code></td><td>KICK_USER_EVENT</td></tr>
+    <tr><td><code>0x0298</code></td><td>DELETE_CHAT_THREAD_EVENT</td></tr>
+    <tr><td><code>0x0299</code></td><td>ADD_COMMENT_EVENT</td></tr>
+    <tr><td><code>0x029A</code></td><td>DELETE_COMMENT_EVENT</td></tr>
+    <tr><td><code>0x029B</code></td><td>NICK_EVENT</td></tr>
+    <tr><td><code>0x029C</code></td><td>MOBILE_ICN_EVENT</td></tr>
+</table>
+
+<h3>Org / Buddy / Nick</h3>
+<table>
+    <tr><th>Code</th><th>Name</th><th>용도</th></tr>
+    <tr><td><code>0x0309</code></td><td>SEARCH_USER</td><td>사용자 검색</td></tr>
+    <tr><td><code>0x030A</code></td><td>SYNC_ORG</td><td>조직도 sync</td></tr>
+    <tr><td><code>0x0380</code></td><td>ORG_USER_EVENT <span class="badge push">Push</span></td><td>조직원 변경</td></tr>
+    <tr><td><code>0x0381</code></td><td>ORG_DEPT_EVENT <span class="badge push">Push</span></td><td>부서 변경</td></tr>
+    <tr><td><code>0x0382</code></td><td>ORG_USER_REMOVED_EVENT <span class="badge push">Push</span></td><td>조직원 제거</td></tr>
+    <tr><td><code>0x0383</code></td><td>ORG_DEPT_REMOVED_EVENT <span class="badge push">Push</span></td><td>부서 제거</td></tr>
+    <tr><td><code>0x0409</code></td><td>BUDDY_ADD_LINK</td><td>버디 추가 (딥링크)</td></tr>
+    <tr><td><code>0x0501</code></td><td>SET_NICK</td><td>닉네임 변경</td></tr>
+    <tr><td><code>0x0502</code></td><td>GET_ALL_NICK</td><td>모든 닉네임 조회</td></tr>
+</table>
+
+<h3>Status / Noti / Subscribe</h3>
+<table>
+    <tr><th>Code</th><th>Name</th><th>용도</th></tr>
+    <tr><td><code>0x0601</code></td><td>SET_PRESENCE</td><td>내 상태 변경</td></tr>
+    <tr><td><code>0x0680</code></td><td>ICON_EVENT <span class="badge push">Push</span></td><td>다른 사용자 상태 변경</td></tr>
+    <tr><td><code>0x0702</code></td><td>GET_NOTI_LIST (SyncNoti)</td><td>알림 sync</td></tr>
+    <tr><td><code>0x0703</code></td><td>ReadNoti</td><td>알림 읽음</td></tr>
+    <tr><td><code>0x0704</code></td><td>DELETE_NOTI</td><td>알림 삭제</td></tr>
+    <tr><td><code>0x0780</code></td><td>NOTIFY_EVENT <span class="badge push">Push</span></td><td>알림 도착</td></tr>
+    <tr><td><code>0x0783</code></td><td>NOTIFICATION_EVENT <span class="badge push">Push</span></td><td>알림 도착 (변형)</td></tr>
+    <tr><td><code>0x0805</code></td><td>BADGE_COUNT</td><td>앱 배지 카운트</td></tr>
+    <tr><td><code>0x0901</code></td><td>PUBLISH <span class="badge push">Push</span></td><td>Presence 발행</td></tr>
+    <tr><td><code>0x0902</code></td><td>SUBSCRIBE</td><td>구독</td></tr>
+    <tr><td><code>0x0903</code></td><td>UNSUBSCRIBE</td><td>구독 해제</td></tr>
+</table>
+
+<h3>Bridge / Message</h3>
+<table>
+    <tr><th>Code</th><th>Name</th><th>용도</th></tr>
+    <tr><td><code>0x0A01</code></td><td>HI</td><td>세션 핸드셰이크</td></tr>
+    <tr><td><code>0x0A02</code></td><td>LOGOUT <span class="badge deprec">deprecated</span></td><td>(LOGOUT_CMD 사용)</td></tr>
+    <tr><td><code>0x0A07</code></td><td>TIME_REQUEST</td><td>서버 시각 동기화</td></tr>
+    <tr><td><code>0x0A09</code></td><td>NOOP</td><td>Keep-alive</td></tr>
+    <tr><td><code>0x0B01</code></td><td>SEND_MESSAGE</td><td>쪽지 송신</td></tr>
+    <tr><td><code>0x0B02</code></td><td>READ_MESSAGE</td><td>쪽지 읽음</td></tr>
+    <tr><td><code>0x0B03</code></td><td>DELETE_MESSAGE</td><td>쪽지 삭제</td></tr>
+    <tr><td><code>0x0B04</code></td><td>GET_MESSAGE_LIST</td><td>쪽지 목록</td></tr>
+    <tr><td><code>0x0B05</code></td><td>RETRIEVE_MESSAGE</td><td>쪽지 회수</td></tr>
+    <tr><td><code>0x0B80</code></td><td>SEND_MESSAGE_EVENT <span class="badge push">Push</span></td><td>쪽지 도착</td></tr>
+    <tr><td><code>0x0B81</code></td><td>READ_MESSAGE_EVENT <span class="badge push">Push</span></td><td>쪽지 읽음 알림</td></tr>
+    <tr><td><code>0x0B82</code></td><td>DELETE_MESSAGE_EVENT <span class="badge push">Push</span></td><td>쪽지 삭제 알림</td></tr>
+    <tr><td><code>0x0B83</code></td><td>RETRIEVE_MESSAGE_EVENT <span class="badge push">Push</span></td><td>쪽지 회수 알림</td></tr>
+</table>
+
+<h2>4. Push 이벤트 처리 파이프라인</h2>
+
+<p><code>PushEventHandler</code>가 <code>invokeId==0</code> 프레임을 받아 명령 코드별로 분기:</p>
+
+<pre><code class="language-kotlin">// 수신 후 분기
+when (command) {
+    ProtocolCommand.SEND_CHAT_EVENT.code -&gt; handleSendChatEvent(data)
+    ProtocolCommand.READ_CHAT_EVENT.code -&gt; handleReadChatEvent(data)
+    ProtocolCommand.ICON_EVENT.code      -&gt; handleIconEvent(data)      // presence
+    ProtocolCommand.NOTIFY_EVENT.code    -&gt; handleNotifyEvent(data)
+    ProtocolCommand.RETRIEVE_MESSAGE_EVENT.code -&gt; handleRetrieveMessageEvent(data)
+    // ... 기타
+}</code></pre>
+
+<p>각 핸들러는 로컬 DB에 반영 후 <code>forwardPushToReact(command, data)</code>로 Web에 <code>{event:"neoPush", command, data}</code> 전달.</p>
+
+<div class="page-nav">
+    <a href="rest.html" class="prev">REST API</a>
+    <a href="../flows/login.html" class="next">Flows: 로그인</a>
+</div>
+
+</main></div></body></html>

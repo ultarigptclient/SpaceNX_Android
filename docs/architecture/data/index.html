@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<title>DB 개요 & ER — Hybrid-Talk v2</title>
+<link rel="stylesheet" href="../assets/style.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/kotlin.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<script>mermaid.initialize({startOnLoad:true,theme:'dark'});window.addEventListener('DOMContentLoaded',()=>hljs.highlightAll());</script>
+</head>
+<body>
+<div class="layout">
+
+<aside class="sidebar">
+    <h1>Hybrid-Talk v2</h1>
+    <div class="group"><div class="group-title">Overview</div><nav>
+        <a href="../index.html">시작하기</a>
+        <a href="../01-overview.html">전체 흐름도 &amp; 구조</a>
+        <a href="../02-communication.html">통신 구조 (3축)</a>
+    </nav></div>
+    <div class="group"><div class="group-title">Architecture</div><nav>
+        <a href="../03-session-login.html">세션 &amp; 로그인 흐름</a>
+        <a href="../04-di.html">Dependency Injection</a>
+        <a href="../05-bridge-handlers.html">Bridge &amp; Handlers</a>
+        <a href="../06-data-layer.html">Data Layer &amp; Repository</a>
+    </nav></div>
+    <div class="group"><div class="group-title">Data</div><nav>
+        <a href="index.html" class="active">DB 개요 &amp; ER</a>
+        <a href="org-db.html">org.db</a>
+        <a href="chat-db.html">chat.db</a>
+        <a href="message-db.html">message.db</a>
+        <a href="noti-db.html">noti.db</a>
+        <a href="project-db.html">project.db</a>
+        <a href="common-setting.html">common / setting</a>
+    </nav></div>
+    <div class="group"><div class="group-title">API</div><nav>
+        <a href="../api/rest.html">REST API</a>
+        <a href="../api/binary.html">Binary Protocol</a>
+    </nav></div>
+    <div class="group"><div class="group-title">Flows</div><nav>
+        <a href="../flows/login.html">로그인 시퀀스</a>
+        <a href="../flows/initial-sync.html">초기 Sync 체인</a>
+        <a href="../flows/chat-send.html">채팅 송수신</a>
+        <a href="../flows/push-event.html">Push 이벤트</a>
+        <a href="../flows/thread.html">말풍선↔스레드↔이슈</a>
+    </nav></div>
+</aside>
+
+<main class="content">
+
+<h1>Data: DB 개요 &amp; ER 다이어그램</h1>
+<p class="lead">
+    6개 SQLCipher-encrypted Room 데이터베이스의 개요, 전체 엔티티 관계, 주요 FK 매핑을 정리합니다.
+    각 DB별 Entity/DAO 상세는 좌측 Data 메뉴에서.
+</p>
+
+<h2>1. DB 7종 (사용자별 분리)</h2>
+<table>
+    <tr><th>DB</th><th>파일 패턴</th><th>엔티티 개수</th><th>주요 엔티티</th></tr>
+    <tr><td><a href="common-setting.html">common</a></td><td>common.db (글로벌)</td><td>2</td><td>CommonEntity, SyncMetaEntity</td></tr>
+    <tr><td><a href="org-db.html">org</a></td><td>org_{userId}.db</td><td>3</td><td>DeptEntity, UserEntity, BuddyEntity</td></tr>
+    <tr><td><a href="chat-db.html">chat</a></td><td>chat_{userId}.db</td><td>5</td><td>ChannelEntity, ChannelMember, ChannelOffset, ChatEntity, ChatEventEntity</td></tr>
+    <tr><td><a href="message-db.html">message</a></td><td>message_{userId}.db</td><td>3</td><td>MessageEntity, AttachEntity, MessageEventEntity</td></tr>
+    <tr><td><a href="noti-db.html">noti</a></td><td>noti_{userId}.db</td><td>2</td><td>NotiEntity, NotiEventEntity</td></tr>
+    <tr><td><a href="common-setting.html">setting</a></td><td>setting_{userId}.db</td><td>1</td><td>SettingEntity</td></tr>
+    <tr><td><a href="project-db.html">project</a></td><td>project_{userId}.db</td><td>8</td><td>ProjectEntity, IssueEntity, ChatThreadEntity, ThreadCommentEntity 등</td></tr>
+</table>
+
+<h2>2. 전체 ER 다이어그램 (핵심 관계)</h2>
+
+<p>말풍선(Chat) → 채널(Channel) → 프로젝트(Project) → 이슈(Issue) → 스레드(Thread) → 답글(Comment)의 계층적 관계도입니다.</p>
+
+<div class="mermaid">
+erDiagram
+    ProjectEntity ||--o{ ProjectMemberEntity  : has
+    ProjectEntity ||--o{ ProjectChannelEntity : links
+    ProjectEntity ||--o{ IssueEntity          : contains
+    ProjectChannelEntity }o--|| ChannelEntity : "channelCode"
+    ChannelEntity ||--o{ ChannelMemberEntity  : has
+    ChannelEntity ||--o{ ChatEntity           : contains
+    ChannelEntity ||--o{ ChannelOffsetEntity  : tracks
+    ChatEntity ||--o{ ChatThreadEntity        : "chatCode"
+    ChatThreadEntity ||--o{ ThreadCommentEntity : "threadCode"
+    IssueEntity ||--o| IssueThreadEntity      : "issueCode"
+    IssueThreadEntity ||--o{ ThreadCommentEntity : "threadCode"
+    IssueEntity }o--o| ChannelEntity          : "channelCode (선택)"
+
+    ProjectEntity {
+        string projectCode PK
+        string projectName
+        string projectStatus
+        string ownerUserId
+        long   deadline
+    }
+    ChannelEntity {
+        string channelCode PK
+        string channelName
+        string channelType
+        long   lastChatDate
+        int    unreadCount
+    }
+    ChatEntity {
+        string channelCode PK "FK to Channel"
+        string chatCode    PK
+        string sendUserId
+        string contents
+        long   sendDate
+        int    chatType
+        string additional "JSON: 리액션/투표/파일"
+    }
+    ChatThreadEntity {
+        string chatCode   PK "FK to Chat"
+        string threadCode PK
+        string channelCode
+        int    commentCount
+    }
+    IssueEntity {
+        string issueCode    PK
+        string projectCode  "FK to Project"
+        string channelCode  "FK to Channel (선택)"
+        string title
+        string issueType
+        string issueStatus
+        string priority
+        string threadCode   "FK to Thread"
+    }
+    IssueThreadEntity {
+        string issueCode   PK "FK to Issue"
+        string threadCode  PK
+    }
+    ThreadCommentEntity {
+        int    commentId  PK
+        string threadCode "FK (Chat or Issue Thread)"
+        string userId
+        string contents
+    }
+</div>
+
+<figure>
+    <img src="../assets/images/f.png" alt="엔티티 관계도 전체">
+    <figcaption>원본 — 말풍선 / 대화스레드 / 이슈스레드 / 답글 / 프로젝트 관계 계층</figcaption>
+</figure>
+
+<h2>3. 관계 요약 (원본 j.png 기준)</h2>
+
+<table>
+    <tr><th>관계</th><th>연결 키</th><th>설명</th></tr>
+    <tr><td>프로젝트 → 채널</td><td><code>ProjectChannelEntity.channelCode</code></td><td>프로젝트에 채팅방 연결</td></tr>
+    <tr><td>프로젝트 → 이슈</td><td><code>IssueEntity.projectCode</code></td><td>프로젝트 하위 이슈</td></tr>
+    <tr><td>이슈 → 채널</td><td><code>IssueEntity.channelCode</code></td><td>이슈가 특정 채팅방에 연관 (선택)</td></tr>
+    <tr><td>말풍선 → 대화스레드</td><td><code>ChatThreadEntity.chatCode</code></td><td>메시지에서 스레드 열기</td></tr>
+    <tr><td>이슈 → 이슈스레드</td><td><code>IssueThreadEntity.issueCode → threadCode</code></td><td>이슈 토론 (자동 생성)</td></tr>
+    <tr><td>대화스레드 / 이슈스레드 → 답글</td><td><code>ThreadCommentEntity.threadCode</code></td><td>동일 댓글 테이블 공유</td></tr>
+</table>
+
+<div class="callout info">
+    <strong>핵심 포인트</strong><br/>
+    <strong>스레드(Thread)가 공통 허브</strong>입니다. 대화 답글이든 이슈 댓글이든 모두 <code>ThreadCommentEntity</code>로 처리되고,
+    <code>threadCode</code>만 다르고 구조는 동일합니다.
+    <br/><br/>
+    <strong>"답글 ≠ Reply-to-message"</strong>: 이 앱의 "답글"은 특정 메시지를 인용하는 인라인 답글이 아니라,
+    스레드 패널에서 대화하는 형태입니다. Slack의 스레드와 유사한 모델.
+</div>
+
+<figure>
+    <img src="../assets/images/i.png" alt="기능 간 연관성 요약">
+    <figcaption>원본 — 프로젝트 → 채널/이슈 트리와 스레드 공통 허브</figcaption>
+</figure>
+
+<h2>4. 공통 패턴</h2>
+
+<h3>4-1. 복합 PK 예시 (ChatEntity)</h3>
+<pre><code class="language-kotlin">@Entity(
+    tableName = "chats",
+    primaryKeys = ["channelCode", "chatCode"],
+    indices = [
+        Index("channelCode"),
+        Index(value = ["channelCode", "sendDate"])
+    ]
+)
+data class ChatEntity(...)</code></pre>
+
+<h3>4-2. JSON 필드 (additional)</h3>
+<p>몇몇 Entity는 확장 메타를 <code>additional</code> 컬럼에 JSON 문자열로 저장합니다:</p>
+<ul>
+    <li><code>ChatEntity.additional</code> — 리액션/투표/파일 첨부 메타</li>
+    <li><code>ChannelEntity.additional</code> — 채널 설정</li>
+    <li><code>MessageEntity.additional</code> — 쪽지 메타</li>
+</ul>
+<p>파싱은 런타임에 <code>JSONObject(entity.additional)</code>으로 처리.</p>
+
+<h3>4-3. Offset / Event 테이블</h3>
+<p>대부분의 도메인은 <code>&lt;name&gt;Entity</code>(본체) + <code>&lt;name&gt;EventEntity</code>(이벤트 로그) 쌍으로 구성:</p>
+<ul>
+    <li><code>chat.db</code>: <code>ChatEntity</code> + <code>ChatEventEntity</code></li>
+    <li><code>message.db</code>: <code>MessageEntity</code> + <code>MessageEventEntity</code></li>
+    <li><code>noti.db</code>: <code>NotiEntity</code> + <code>NotiEventEntity</code></li>
+</ul>
+<p>Event 테이블은 Push로 들어오는 CRUD 이벤트를 저장해 React로 전달하기 위한 임시 버퍼 역할도 함.</p>
+
+<h3>4-4. SyncMeta</h3>
+<p>각 DB마다 <code>SyncMetaEntity</code>가 있어 마지막 sync 시점(<code>{domain}_last_sync_time</code>)을 저장합니다.
+<code>project.db</code>는 <code>ProjectSyncMetaEntity</code>로 별도.</p>
+
+<div class="page-nav">
+    <a href="../06-data-layer.html" class="prev">06. Data Layer</a>
+    <a href="org-db.html" class="next">org.db</a>
+</div>
+
+</main>
+</div>
+</body>
+</html>

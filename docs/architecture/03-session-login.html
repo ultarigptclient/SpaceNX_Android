@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<title>03. 세션 & 로그인 — Hybrid-Talk v2</title>
+<link rel="stylesheet" href="assets/style.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/kotlin.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<script>mermaid.initialize({startOnLoad:true,theme:'dark'});window.addEventListener('DOMContentLoaded',()=>hljs.highlightAll());</script>
+</head>
+<body>
+<div class="layout">
+
+<aside class="sidebar">
+    <h1>Hybrid-Talk v2</h1>
+    <div class="group"><div class="group-title">Overview</div><nav>
+        <a href="index.html">시작하기</a>
+        <a href="01-overview.html">전체 흐름도 &amp; 구조</a>
+        <a href="02-communication.html">통신 구조 (3축)</a>
+    </nav></div>
+    <div class="group"><div class="group-title">Architecture</div><nav>
+        <a href="03-session-login.html" class="active">세션 &amp; 로그인 흐름</a>
+        <a href="04-di.html">Dependency Injection</a>
+        <a href="05-bridge-handlers.html">Bridge &amp; Handlers</a>
+        <a href="06-data-layer.html">Data Layer &amp; Repository</a>
+    </nav></div>
+    <div class="group"><div class="group-title">Data</div><nav>
+        <a href="data/index.html">DB 개요 &amp; ER</a>
+        <a href="data/org-db.html">org.db</a>
+        <a href="data/chat-db.html">chat.db</a>
+        <a href="data/message-db.html">message.db</a>
+        <a href="data/noti-db.html">noti.db</a>
+        <a href="data/project-db.html">project.db</a>
+        <a href="data/common-setting.html">common / setting</a>
+    </nav></div>
+    <div class="group"><div class="group-title">API</div><nav>
+        <a href="api/rest.html">REST API</a>
+        <a href="api/binary.html">Binary Protocol</a>
+    </nav></div>
+    <div class="group"><div class="group-title">Flows</div><nav>
+        <a href="flows/login.html">로그인 시퀀스</a>
+        <a href="flows/initial-sync.html">초기 Sync 체인</a>
+        <a href="flows/chat-send.html">채팅 송수신</a>
+        <a href="flows/push-event.html">Push 이벤트</a>
+        <a href="flows/thread.html">말풍선↔스레드↔이슈</a>
+    </nav></div>
+</aside>
+
+<main class="content">
+
+<h1>03. 세션 &amp; 로그인 흐름</h1>
+<p class="lead">
+    로그인 종류 2가지(수동/자동), JWT 관리, HI 핸드셰이크, 재연결 정책까지
+    세션과 관련된 모든 내용을 한 페이지에 정리합니다.
+</p>
+
+<h2>1. LoginState — 단일 진실 소스</h2>
+<p>로그인 상태는 <code>LoginViewModel</code>의 <code>StateFlow&lt;LoginState&gt;</code>가 유일한 진실 소스입니다. Activity는 이걸 구독만 합니다.</p>
+
+<pre><code class="language-kotlin">sealed class LoginState {
+    object Idle : LoginState()
+    object InProgress : LoginState()
+    data class Authenticated(val userJson: JSONObject) : LoginState()   // 즉시 UI 진입
+    data class LoggedIn(val sessionData: JSONObject) : LoginState()     // HI 완료 후
+    data class Failed(val errorCode: Int, val errorMessage: String) : LoginState()
+    object LoggedOut : LoginState()
+}</code></pre>
+
+<div class="callout info">
+    <strong><code>Authenticated</code> vs <code>LoggedIn</code>의 차이</strong><br/>
+    <code>Authenticated</code>는 <strong>REST 로그인 성공 직후</strong> 방출되어 UI에 즉시 SPA를 로드하게 합니다.
+    <code>LoggedIn</code>은 <strong>Binary HI 핸드셰이크 완료 후</strong> 방출되어 "이제 실시간 Push도 받을 수 있다"는 신호로 쓰입니다.
+</div>
+
+<h2>2. 수동 로그인 (사용자 입력)</h2>
+
+<div class="mermaid">
+sequenceDiagram
+    participant JS as React (LoginPage)
+    participant B as Bridge
+    participant A as AuthRepository
+    participant REST as REST :18019
+    participant S as Socket :18000
+
+    JS->>B: postMessage({action:"login", userId, password})
+    B->>A: login(userId, password)
+    A->>REST: POST /api/auth/login
+    REST-->>A: {accessToken, refreshToken, userId, userName, deptId}
+    A->>A: JWT 저장 (EncryptedSharedPreferences)
+    A-->>JS: ★ LoginState.Authenticated 방출<br/>(소켓 연결 기다리지 않음!)
+    JS->>JS: SPA 메인 화면 진입
+
+    Note over A: 백그라운드 시작
+    par syncConfig
+        A->>REST: POST /api/auth/syncconfig
+        REST-->>A: {configs:{...}, lastSyncTime}
+        A->>A: AppConfig.configCache에 저장
+    and connectSocket
+        A->>S: BinarySocketClient.connect()
+        A->>S: sendHI(userId, token)
+        S-->>A: HI 응답 {sessionKey, ...}
+        A-->>JS: LoginState.LoggedIn 방출
+    end
+</div>
+
+<h2>3. 자동 로그인 (reconnect)</h2>
+<p>앱 재시작 시 <code>startProcess()</code>에서 저장된 <code>refreshToken + userId</code> 확인 후 자동 로그인을 시도합니다.</p>
+
+<div class="mermaid">
+sequenceDiagram
+    participant App as MainActivity.startProcess()
+    participant VM as LoginViewModel
+    participant A as AuthRepository
+    participant REST as REST
+    participant S as Socket
+    participant JS as WebView
+
+    App->>App: 저장된 refreshToken + userId 확인
+    alt 있음
+        App->>VM: reconnect(userId)
+        VM->>A: reconnect(userId)
+        A->>REST: POST /api/auth/refresh (최대 3회, 5초 간격)
+        REST-->>A: 새 accessToken
+        A->>A: 새 토큰 저장
+        A->>A: userJson 구성 (저장된 userId/userName/deptId)
+        A-->>VM: ★ LoginState.Authenticated 즉시 방출
+        App->>JS: webView.loadUrl(spaUrl)
+        par 백그라운드
+            A->>REST: POST /api/auth/syncconfig
+            Note right of A: SKIN 변경 감지 시 SkinChanged 이벤트
+        and
+            A->>S: connectSocket()
+        end
+    else 없음
+        App->>JS: webView.loadUrl(spaUrl) — 로그인 화면 표시
+    end
+</div>
+
+<h3>저장된 로그인 정보 복원 (<code>_restoreSavedLogin</code>)</h3>
+<p>로그아웃 후 로그인 화면에 진입하면 Android가 자동으로 ID를 채워줍니다:</p>
+<pre><code class="language-kotlin">// 로그인 화면 진입 시
+val saved = JSONObject().apply {
+    put("userId", appConfig.getSavedUserId())
+    put("password", if (appConfig.shouldSavePassword()) appConfig.getSavedPassword() else "")
+    put("savePassword", appConfig.shouldSavePassword())
+    put("autoLogin", appConfig.shouldAutoLogin())
+}
+evalJs("window._restoreSavedLogin &amp;&amp; window._restoreSavedLogin('${esc(saved.toString())}')")</code></pre>
+
+<h2>4. JWT 관리</h2>
+
+<h3>4-1. 저장 위치</h3>
+<p>모든 토큰/비밀번호는 <code>EncryptedSharedPreferences</code> (AES256-GCM)에 저장. 관리는 <code>AppConfig</code>가 담당.</p>
+
+<table>
+    <tr><th>키</th><th>용도</th></tr>
+    <tr><td><code>KEY_ACCESS_TOKEN</code></td><td>JWT access token — REST 요청 헤더</td></tr>
+    <tr><td><code>KEY_REFRESH_TOKEN</code></td><td>JWT refresh token — 만료 시 갱신용</td></tr>
+    <tr><td><code>KEY_USER_ID</code></td><td>로그인 ID (자동로그인용)</td></tr>
+    <tr><td><code>KEY_PASSWORD</code></td><td>사용자가 "비밀번호 저장" 체크 시 보존</td></tr>
+    <tr><td><code>KEY_SAVE_PASSWORD</code>, <code>KEY_AUTO_LOGIN</code></td><td>토글 상태</td></tr>
+</table>
+
+<h3>4-2. 만료 대응</h3>
+<div class="mermaid">
+flowchart TD
+    A["REST 요청 수행"] --> B{"응답 코드"}
+    B -->|"200 OK"| OK["완료"]
+    B -->|"401 Unauthorized"| R["refresh 호출<br/>POST /api/auth/refresh"]
+    R --> R1{"성공?"}
+    R1 -->|"Yes"| R2["새 accessToken 저장"]
+    R2 --> R3["원래 요청 재시도"]
+    R3 --> OK
+    R1 -->|"No (3회 실패)"| L["자동 로그아웃<br/>LoggedOut 방출"]
+</div>
+
+<h2>5. HI 핸드셰이크 (Binary Socket 초기화)</h2>
+
+<p>Socket 연결 후 가장 먼저 보내는 프레임. 이게 성공해야 소켓으로 다른 명령을 보낼 수 있습니다.</p>
+
+<pre><code class="language-kotlin">// SocketSessionManager.sendHI()
+val body = JSONObject().apply {
+    put("userId", userId)
+    put("token", jwtToken)
+    put("deviceType", "android")
+    put("pushToken", fcmToken)
+    put("deviceId", deviceId)
+    put("appVersion", BuildConfig.VERSION_NAME)
+}
+binarySocketClient.sendFrame(ProtocolCommand.HI.code, body.toString().toByteArray())</code></pre>
+
+<h3>응답 처리</h3>
+<ul>
+    <li><code>errorCode == 0</code> 확인</li>
+    <li>서버가 새 토큰을 발급하면 저장 (서버는 때때로 토큰 갱신을 HI 응답으로 실어 보냄)</li>
+    <li><code>jwtTokenDeferred.complete()</code>, <code>hiCompletedDeferred.complete()</code></li>
+    <li><code>LoginState.LoggedIn</code> 방출</li>
+    <li><code>TIME_REQUEST (0x0A07)</code> 송신 (시각 동기화)</li>
+</ul>
+
+<div class="callout info">
+    <strong><code>CompletableDeferred</code> 패턴</strong><br/>
+    <code>jwtTokenDeferred</code>, <code>hiCompletedDeferred</code>는 "토큰이 준비될 때까지" / "HI가 완료될 때까지"
+    대기하는 다른 코루틴의 동기화 수단입니다. Socket 프레임을 보내기 전 <code>await()</code>하는 패턴이 여러 곳에 있습니다.
+</div>
+
+<h2>6. 재연결 정책</h2>
+<p><code>BinarySocketClient</code>는 연결이 끊기면 backoff 재연결을 시도합니다.</p>
+
+<table>
+    <tr><th>트리거</th><th>동작</th></tr>
+    <tr><td>WebSocket close (정상)</td><td>즉시 재연결 시도</td></tr>
+    <tr><td>IOException (비정상)</td><td>지수 백오프 (최대 30초)</td></tr>
+    <tr><td>Keep-alive NOOP 실패</td><td>연결 종료 → 재연결</td></tr>
+    <tr><td>HI 실패</td><td>토큰 갱신 후 재시도, 3회 실패 시 로그아웃</td></tr>
+</table>
+
+<h2>7. 로그아웃 흐름</h2>
+<div class="mermaid">
+sequenceDiagram
+    participant JS as React
+    participant B as Bridge
+    participant D as Dispatcher
+    participant A as AuthRepository
+    participant S as Socket
+
+    JS->>B: postMessage({action:"logout"})
+    B->>D: dispatch("logout")
+    D->>A: requestLogout()
+    A->>S: 소켓 TCP 종료
+    A->>A: 캐시 초기화 (Org/Channel/Buddy/UserNameCache)
+    A->>A: HTTP 클라이언트 해제
+    A->>A: accessToken / refreshToken 삭제
+    A-->>JS: window.postMessage({event:"neoDisconnected"})
+    A-->>JS: window._logoutResolve()
+    A-->>JS: window._restoreSavedLogin({userId, password, ...})
+    Note over JS: 로그인 화면으로 전환
+</div>
+
+<p>저장된 userId/password는 삭제되지 않습니다(토글 상태에 따라). 로그아웃 후 로그인 화면에 <code>_restoreSavedLogin</code>으로 다시 채워줍니다.</p>
+
+<h2>8. 세션 수명 스코프</h2>
+
+<p><code>AuthRepository</code> / <code>SocketSessionManager</code>는 다음 세 가지 스코프를 다룹니다:</p>
+
+<table>
+    <tr><th>스코프</th><th>생존 기간</th><th>용도</th></tr>
+    <tr><td><code>applicationScope</code></td><td>앱 프로세스 전체</td><td>DB 워밍업, FCM 토큰</td></tr>
+    <tr><td><code>loginSessionScope</code></td><td>Authenticated → LoggedOut</td><td>Socket, sync, Push 이벤트 처리</td></tr>
+    <tr><td><code>lifecycleScope</code></td><td>Activity 수명</td><td>UI 이벤트, bridge 핸들러</td></tr>
+</table>
+
+<p>로그아웃 시 <code>loginSessionScope.cancel()</code>로 모든 사용자 범위 코루틴을 한 번에 정리합니다.</p>
+
+<div class="page-nav">
+    <a href="02-communication.html" class="prev">02. 통신 구조</a>
+    <a href="04-di.html" class="next">04. DI</a>
+</div>
+
+</main>
+</div>
+</body>
+</html>

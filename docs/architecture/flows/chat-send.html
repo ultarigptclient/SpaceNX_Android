@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head><meta charset="UTF-8"><title>채팅 송수신 — Hybrid-Talk v2</title>
+<link rel="stylesheet" href="../assets/style.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/kotlin.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<script>mermaid.initialize({startOnLoad:true,theme:'dark'});window.addEventListener('DOMContentLoaded',()=>hljs.highlightAll());</script>
+</head><body><div class="layout">
+
+<aside class="sidebar">
+    <h1>Hybrid-Talk v2</h1>
+    <div class="group"><div class="group-title">Overview</div><nav>
+        <a href="../index.html">시작하기</a><a href="../01-overview.html">전체 흐름도</a><a href="../02-communication.html">통신 구조</a>
+    </nav></div>
+    <div class="group"><div class="group-title">Architecture</div><nav>
+        <a href="../03-session-login.html">세션 &amp; 로그인</a><a href="../04-di.html">DI</a>
+        <a href="../05-bridge-handlers.html">Bridge &amp; Handlers</a><a href="../06-data-layer.html">Data Layer</a>
+    </nav></div>
+    <div class="group"><div class="group-title">Data</div><nav>
+        <a href="../data/index.html">DB 개요 &amp; ER</a><a href="../data/org-db.html">org.db</a>
+        <a href="../data/chat-db.html">chat.db</a><a href="../data/message-db.html">message.db</a>
+        <a href="../data/noti-db.html">noti.db</a><a href="../data/project-db.html">project.db</a>
+        <a href="../data/common-setting.html">common / setting</a>
+    </nav></div>
+    <div class="group"><div class="group-title">API</div><nav>
+        <a href="../api/rest.html">REST API</a><a href="../api/binary.html">Binary Protocol</a>
+    </nav></div>
+    <div class="group"><div class="group-title">Flows</div><nav>
+        <a href="login.html">로그인</a><a href="initial-sync.html">초기 Sync</a>
+        <a href="chat-send.html" class="active">채팅 송수신</a><a href="push-event.html">Push 이벤트</a>
+        <a href="thread.html">말풍선↔스레드</a>
+    </nav></div>
+</aside>
+
+<main class="content">
+<h1>Flow: 채팅 송수신</h1>
+<p class="lead">
+    내가 메시지를 보낼 때와 상대방이 보낸 메시지를 받을 때의 양방향 플로우를 봅니다.
+    핵심은 "내가 보낸 경우도 서버 Push를 기다리지 않고 optimistic하게 DB/UI 반영" 전략입니다.
+</p>
+
+<h2>A. 송신 플로우</h2>
+<div class="mermaid">
+sequenceDiagram
+    autonumber
+    participant U as 사용자
+    participant JS as React ChatPage
+    participant B as Bridge
+    participant H as ChatHandler
+    participant REST as REST
+    participant DB as chat.db
+    participant S as Server
+    participant P as 상대방
+
+    U->>JS: 메시지 입력 + 전송
+    JS->>JS: optimistic UI update<br/>(pending 상태로 말풍선 표시)
+    JS->>B: postMessage({action:"sendChat", channelCode, contents, ...})
+    B->>H: ChatHandler.handleSendChat()
+    H->>REST: POST /api/comm/sendchat
+    REST->>S: 서버 처리
+    S-->>REST: {errorCode:0, chatCode, sendDate}
+    REST-->>H: 응답
+    H->>DB: chatDao.upsert(new ChatEntity)
+    H->>DB: channelDao.updateLastChat(channelCode, contents, sendDate)
+    H-->>JS: resolveToJs("sendChat", {chatCode, sendDate})
+    JS->>JS: pending → confirmed로 전환
+
+    Note over S,P: 서버가 채널 참여자 모두에게 Push
+    S-->>P: Binary SEND_CHAT_EVENT (0x0280)
+    P->>P: PushEventHandler → DB 반영<br/>→ window.postMessage({event:"neoPush",<br/>command:"SendChatEvent", data})
+    P->>P: React: 새 말풍선 렌더링
+</div>
+
+<h2>B. 수신 플로우 (Push)</h2>
+<div class="mermaid">
+sequenceDiagram
+    participant S as Server
+    participant SM as SocketSessionManager
+    participant PH as PushEventHandler
+    participant DB as chat.db
+    participant JS as React
+
+    S-->>SM: Binary SEND_CHAT_EVENT<br/>(invokeId=0)
+    SM->>SM: isPushEvent(0x0280) → PushEventHandler로
+    SM->>PH: handleSendChatEvent(data)
+    PH->>DB: chatDao.upsert(ChatEntity.fromJson(data))
+    PH->>DB: channelDao.updateLastChat + updateUnreadCount
+    PH->>JS: forwardPushToReact("SendChatEvent", data)<br/>→ window.postMessage({event:"neoPush", ...})
+    JS->>JS: 이벤트 리스너에서 수신<br/>활성 채널이면 즉시 렌더링<br/>아니면 채널 배지만 갱신
+</div>
+
+<h2>읽음 처리 플로우</h2>
+<div class="mermaid">
+sequenceDiagram
+    participant JS
+    participant B
+    participant H as ChatHandler
+    participant REST
+    participant DB as chat.db
+    participant S as Server
+    participant Peer as 발신자
+
+    JS->>B: postMessage({action:"readChat", channelCode, chatCode})
+    B->>H: handleReadChat()
+    H->>REST: POST /api/comm/readchat<br/>{channelCode, chatCode, userId}
+    REST-->>H: {errorCode:0, offsetDate}
+    H->>DB: channelOffsetDao.upsert(offset)
+    H-->>JS: resolveToJs("readChat")
+
+    Note over S,Peer: 서버가 발신자에게 읽음 알림
+    S-->>Peer: Binary READ_CHAT_EVENT (0x0281)
+    Peer->>Peer: PushEventHandler → offsetDate 갱신<br/>unreadCount 재계산
+    Peer->>Peer: React: 말풍선 옆 읽음 뱃지 업데이트
+</div>
+
+<h2>중복 전송 방지</h2>
+<p><code>ChatHandler</code>에는 중복 <code>readChat</code> 방지 로직이 있습니다:</p>
+<pre><code class="language-kotlin">private val pendingReads = Collections.synchronizedSet(mutableSetOf&lt;String&gt;())
+
+private suspend fun handleReadChat(params: Map&lt;String, Any?&gt;) {
+    val key = "${channelCode}:${chatCode}"
+    if (!pendingReads.add(key)) return      // 이미 진행 중
+    try {
+        // REST 호출
+    } finally {
+        pendingReads.remove(key)
+    }
+}</code></pre>
+
+<h2>에러/재시도</h2>
+<ul>
+    <li>네트워크 실패: <code>rejectToJs("sendChat", e.message)</code>. React가 pending 말풍선을 "전송 실패" 표시</li>
+    <li>사용자가 재시도: 동일 <code>sendChat</code> 액션 재호출</li>
+    <li>서버 에러(errorCode ≠ 0): 메시지에 따라 토스트 표시</li>
+</ul>
+
+<h2>참조 파일</h2>
+<ul>
+    <li><code>ui/bridge/handler/ChatHandler.kt</code></li>
+    <li><code>data/repository/ChannelRepository.kt</code> (<code>syncChat</code>)</li>
+    <li><code>data/repository/PushEventHandler.kt</code> (<code>handleSendChatEvent</code>, <code>handleReadChatEvent</code>)</li>
+</ul>
+
+<div class="page-nav">
+    <a href="initial-sync.html" class="prev">초기 Sync</a>
+    <a href="push-event.html" class="next">Push 이벤트</a>
+</div>
+
+</main></div></body></html>

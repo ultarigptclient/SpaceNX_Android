@@ -1,0 +1,106 @@
+{
+  "project_info": {
+    "project_number": "66168583878",
+    "firebase_url": "https://ultari-mobile-api.firebaseio.com",
+    "project_id": "ultari-mobile-api",
+    "storage_bucket": "ultari-mobile-api.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:66168583878:android:3f3e5931f1cf4a3e",
+        "android_client_info": {
+          "package_name": "com.amc.ui"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBMJ1o42bOIsDzMX9N9K4-g1EgOz3NOGfU"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:66168583878:android:959392fdbe93c1c8",
+        "android_client_info": {
+          "package_name": "kr.co.ultari.atsmart.basic"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBMJ1o42bOIsDzMX9N9K4-g1EgOz3NOGfU"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:66168583878:android:44e89a242158b8188f09c7",
+        "android_client_info": {
+          "package_name": "kr.co.ultari.atsmart.basic.mobile.pss"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBMJ1o42bOIsDzMX9N9K4-g1EgOz3NOGfU"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:66168583878:android:dc920f92180e40258f09c7",
+        "android_client_info": {
+          "package_name": "kr.co.ultari.atsmart.hybridwebmessenger"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBMJ1o42bOIsDzMX9N9K4-g1EgOz3NOGfU"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:66168583878:android:23312dbc6462e2898f09c7",
+        "android_client_info": {
+          "package_name": "net.spacenx.messenger"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBMJ1o42bOIsDzMX9N9K4-g1EgOz3NOGfU"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

@@ -1,0 +1,162 @@
+{
+  "formatVersion": 1,
+  "database": {
+    "version": 2,
+    "identityHash": "8f6551f8b1e4f948da9ca7a1f3634cb4",
+    "entities": [
+      {
+        "tableName": "notis",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`notiCode` TEXT NOT NULL, `systemCode` TEXT NOT NULL, `systemName` TEXT NOT NULL, `senderName` TEXT NOT NULL, `notiTitle` TEXT NOT NULL, `notiContents` TEXT NOT NULL, `linkUrl` TEXT, `alertType` TEXT NOT NULL, `sendDate` INTEGER NOT NULL, `read` INTEGER NOT NULL, PRIMARY KEY(`notiCode`))",
+        "fields": [
+          {
+            "fieldPath": "notiCode",
+            "columnName": "notiCode",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "systemCode",
+            "columnName": "systemCode",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "systemName",
+            "columnName": "systemName",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "senderName",
+            "columnName": "senderName",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "notiTitle",
+            "columnName": "notiTitle",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "notiContents",
+            "columnName": "notiContents",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "linkUrl",
+            "columnName": "linkUrl",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "alertType",
+            "columnName": "alertType",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sendDate",
+            "columnName": "sendDate",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "read",
+            "columnName": "read",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "notiCode"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_notis_sendDate",
+            "unique": false,
+            "columnNames": [
+              "sendDate"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_notis_sendDate` ON `${TABLE_NAME}` (`sendDate`)"
+          }
+        ],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "notiEvents",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`eventId` INTEGER NOT NULL, `command` TEXT NOT NULL, `notiCode` TEXT NOT NULL, `sendDate` INTEGER NOT NULL, PRIMARY KEY(`eventId`))",
+        "fields": [
+          {
+            "fieldPath": "eventId",
+            "columnName": "eventId",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "command",
+            "columnName": "command",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "notiCode",
+            "columnName": "notiCode",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sendDate",
+            "columnName": "sendDate",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "eventId"
+          ]
+        },
+        "indices": [],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "syncMeta",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`key` TEXT NOT NULL, `value` INTEGER NOT NULL, PRIMARY KEY(`key`))",
+        "fields": [
+          {
+            "fieldPath": "key",
+            "columnName": "key",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "value",
+            "columnName": "value",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "key"
+          ]
+        },
+        "indices": [],
+        "foreignKeys": []
+      }
+    ],
+    "views": [],
+    "setupQueries": [
+      "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '8f6551f8b1e4f948da9ca7a1f3634cb4')"
+    ]
+  }
+}

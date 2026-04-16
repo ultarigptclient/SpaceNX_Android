@@ -1,0 +1,281 @@
+{
+  "formatVersion": 1,
+  "database": {
+    "version": 3,
+    "identityHash": "e8def3c6049ec0cd20e362627c3fbd4b",
+    "entities": [
+      {
+        "tableName": "messages",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`messageCode` TEXT NOT NULL, `sendUserId` TEXT NOT NULL, `title` TEXT NOT NULL, `contents` TEXT NOT NULL, `rtfContents` TEXT, `sendDate` INTEGER NOT NULL, `scheduleDate` INTEGER NOT NULL, `state` INTEGER NOT NULL, `receivers` TEXT NOT NULL, `messageType` INTEGER NOT NULL, `important` INTEGER NOT NULL, `individual` INTEGER NOT NULL, `silent` INTEGER NOT NULL, `retrieved` INTEGER NOT NULL, `attachInfo` TEXT, PRIMARY KEY(`messageCode`))",
+        "fields": [
+          {
+            "fieldPath": "messageCode",
+            "columnName": "messageCode",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sendUserId",
+            "columnName": "sendUserId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "title",
+            "columnName": "title",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "contents",
+            "columnName": "contents",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "rtfContents",
+            "columnName": "rtfContents",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "sendDate",
+            "columnName": "sendDate",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "scheduleDate",
+            "columnName": "scheduleDate",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "state",
+            "columnName": "state",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "receivers",
+            "columnName": "receivers",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "messageType",
+            "columnName": "messageType",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "important",
+            "columnName": "important",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "individual",
+            "columnName": "individual",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "silent",
+            "columnName": "silent",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "retrieved",
+            "columnName": "retrieved",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "attachInfo",
+            "columnName": "attachInfo",
+            "affinity": "TEXT",
+            "notNull": false
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "messageCode"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_messages_sendDate",
+            "unique": false,
+            "columnNames": [
+              "sendDate"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_messages_sendDate` ON `${TABLE_NAME}` (`sendDate`)"
+          },
+          {
+            "name": "index_messages_state_sendDate",
+            "unique": false,
+            "columnNames": [
+              "state",
+              "sendDate"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_messages_state_sendDate` ON `${TABLE_NAME}` (`state`, `sendDate`)"
+          }
+        ],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "attachs",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`messageCode` TEXT NOT NULL, `filePath` TEXT NOT NULL, `fileName` TEXT NOT NULL, `fileLength` INTEGER NOT NULL, `lastModifiedDate` INTEGER NOT NULL, `originalFileName` TEXT NOT NULL, `fileId` TEXT NOT NULL, PRIMARY KEY(`messageCode`, `fileName`))",
+        "fields": [
+          {
+            "fieldPath": "messageCode",
+            "columnName": "messageCode",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "filePath",
+            "columnName": "filePath",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "fileName",
+            "columnName": "fileName",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "fileLength",
+            "columnName": "fileLength",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "lastModifiedDate",
+            "columnName": "lastModifiedDate",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "originalFileName",
+            "columnName": "originalFileName",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "fileId",
+            "columnName": "fileId",
+            "affinity": "TEXT",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "messageCode",
+            "fileName"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_attachs_messageCode",
+            "unique": false,
+            "columnNames": [
+              "messageCode"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_attachs_messageCode` ON `${TABLE_NAME}` (`messageCode`)"
+          }
+        ],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "messageEvents",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`eventId` INTEGER NOT NULL, `command` TEXT NOT NULL, `messageCode` TEXT NOT NULL, `sendUserId` TEXT NOT NULL, `sendDate` INTEGER NOT NULL, `receive` INTEGER NOT NULL, PRIMARY KEY(`eventId`))",
+        "fields": [
+          {
+            "fieldPath": "eventId",
+            "columnName": "eventId",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "command",
+            "columnName": "command",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "messageCode",
+            "columnName": "messageCode",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sendUserId",
+            "columnName": "sendUserId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sendDate",
+            "columnName": "sendDate",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "receive",
+            "columnName": "receive",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "eventId"
+          ]
+        },
+        "indices": [],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "syncMeta",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`key` TEXT NOT NULL, `value` INTEGER NOT NULL, PRIMARY KEY(`key`))",
+        "fields": [
+          {
+            "fieldPath": "key",
+            "columnName": "key",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "value",
+            "columnName": "value",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "key"
+          ]
+        },
+        "indices": [],
+        "foreignKeys": []
+      }
+    ],
+    "views": [],
+    "setupQueries": [
+      "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, 'e8def3c6049ec0cd20e362627c3fbd4b')"
+    ]
+  }
+}

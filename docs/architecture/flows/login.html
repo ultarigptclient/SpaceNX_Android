@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head><meta charset="UTF-8"><title>로그인 시퀀스 — Hybrid-Talk v2</title>
+<link rel="stylesheet" href="../assets/style.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/kotlin.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<script>mermaid.initialize({startOnLoad:true,theme:'dark'});window.addEventListener('DOMContentLoaded',()=>hljs.highlightAll());</script>
+</head><body><div class="layout">
+
+<aside class="sidebar">
+    <h1>Hybrid-Talk v2</h1>
+    <div class="group"><div class="group-title">Overview</div><nav>
+        <a href="../index.html">시작하기</a><a href="../01-overview.html">전체 흐름도</a><a href="../02-communication.html">통신 구조</a>
+    </nav></div>
+    <div class="group"><div class="group-title">Architecture</div><nav>
+        <a href="../03-session-login.html">세션 &amp; 로그인</a><a href="../04-di.html">DI</a>
+        <a href="../05-bridge-handlers.html">Bridge &amp; Handlers</a><a href="../06-data-layer.html">Data Layer</a>
+    </nav></div>
+    <div class="group"><div class="group-title">Data</div><nav>
+        <a href="../data/index.html">DB 개요 &amp; ER</a><a href="../data/org-db.html">org.db</a>
+        <a href="../data/chat-db.html">chat.db</a><a href="../data/message-db.html">message.db</a>
+        <a href="../data/noti-db.html">noti.db</a><a href="../data/project-db.html">project.db</a>
+        <a href="../data/common-setting.html">common / setting</a>
+    </nav></div>
+    <div class="group"><div class="group-title">API</div><nav>
+        <a href="../api/rest.html">REST API</a><a href="../api/binary.html">Binary Protocol</a>
+    </nav></div>
+    <div class="group"><div class="group-title">Flows</div><nav>
+        <a href="login.html" class="active">로그인</a><a href="initial-sync.html">초기 Sync</a>
+        <a href="chat-send.html">채팅 송수신</a><a href="push-event.html">Push 이벤트</a>
+        <a href="thread.html">말풍선↔스레드</a>
+    </nav></div>
+</aside>
+
+<main class="content">
+<h1>Flow: 로그인</h1>
+<p class="lead">사용자 입력(수동) / 앱 재시작(자동) 두 경우의 전체 시퀀스를 엔드투엔드로 보여줍니다.</p>
+
+<h2>A. 수동 로그인 (사용자 입력)</h2>
+<div class="mermaid">
+sequenceDiagram
+    autonumber
+    participant U as 사용자
+    participant JS as React LoginPage
+    participant B as WebAppBridge
+    participant D as BridgeDispatcher
+    participant A as AuthRepository
+    participant REST as REST
+    participant S as BinarySocket
+    participant VM as LoginViewModel
+    participant Main as MainActivity
+
+    U->>JS: userId / password 입력 + 로그인 버튼
+    JS->>B: postMessage({action:"login", userId, password})
+    B->>D: dispatch("login", params)
+    D->>Main: onLoginFromWeb(userId, password)
+    Main->>VM: viewModel.login(userId, password)
+    VM->>A: authRepo.login(userId, password)
+    A->>REST: POST /api/auth/login
+    REST-->>A: 200 {accessToken, refreshToken, userId, userName, deptId}
+    A->>A: EncryptedSharedPreferences에 토큰 저장
+    A-->>VM: LoginResult.Success(userJson)
+    VM->>VM: _loginState.value = Authenticated(userJson)
+    VM-->>Main: Flow 구독: LoginState.Authenticated
+    Main->>JS: window._loginResolve(userJson)
+    Note over JS: React가 즉시 SPA 메인으로 전환
+
+    par 백그라운드 (병렬)
+        A->>REST: POST /api/auth/syncconfig
+        REST-->>A: {configs, lastSyncTime}
+        A->>A: AppConfig.configCache 업데이트
+    and
+        A->>S: BinarySocketClient.connect()
+        S-->>A: WebSocket open
+        A->>S: sendHI() — 0x0A01
+        S-->>A: HI 응답 {sessionKey, userInfo, nick, config}
+        A->>A: jwtTokenDeferred.complete()<br/>hiCompletedDeferred.complete()
+        A-->>VM: LoggedIn(sessionData) 방출
+    end
+</div>
+
+<h2>B. 자동 로그인 (앱 재시작)</h2>
+<div class="mermaid">
+sequenceDiagram
+    autonumber
+    participant App as HybridWebMessengerApp
+    participant Main as MainActivity
+    participant AC as AppConfig
+    participant VM as LoginViewModel
+    participant A as AuthRepository
+    participant REST as REST
+    participant S as BinarySocket
+    participant JS as React
+
+    App->>App: onCreate() → Hilt DI + DB 워밍업 + FCM
+    Main->>Main: onCreate() → WebView 초기화
+    Main->>AC: getSavedRefreshToken()
+    AC-->>Main: refreshToken (exists)
+    Main->>VM: reconnect(savedUserId)
+    VM->>A: authRepo.reconnect(savedUserId)
+
+    loop 최대 3회 (5초 간격)
+        A->>REST: POST /api/auth/refresh {refreshToken}
+        alt 성공
+            REST-->>A: 200 {accessToken, refreshToken}
+            Note over A: break
+        else 실패
+            A->>A: 5초 대기 후 재시도
+        end
+    end
+
+    alt 새 토큰 확보
+        A->>A: 새 토큰 저장
+        A->>A: userJson 구성 (저장된 userId/userName/deptId)
+        A-->>VM: LoginState.Authenticated 즉시 방출
+        Main->>JS: webView.loadUrl(spaUrl)
+        par 백그라운드
+            A->>REST: POST /api/auth/syncconfig
+            A->>S: connectSocket + sendHI()
+        end
+    else 3회 모두 실패
+        A-->>VM: LoginState.LoggedOut
+        Main->>JS: 로그인 화면 로드 + _restoreSavedLogin
+    end
+</div>
+
+<h2>C. 로그아웃</h2>
+<div class="mermaid">
+sequenceDiagram
+    participant JS
+    participant B as Bridge
+    participant A as AuthRepo
+    participant S as Socket
+    participant Main
+
+    JS->>B: postMessage({action:"logout"})
+    B->>A: requestLogout()
+    A->>S: disconnect() (TCP close)
+    A->>A: completedSyncs.clear()<br/>userNameCache.clear()
+    A->>A: accessToken / refreshToken 삭제
+    A-->>JS: window.postMessage({event:"neoDisconnected"})
+    A-->>JS: window._logoutResolve()
+    A-->>JS: window._restoreSavedLogin({userId, password, savePassword, autoLogin})
+    Note over JS: 로그인 페이지로 전환<br/>(저장된 ID/PW 자동 채움)
+</div>
+
+<h2>주요 참조</h2>
+<ul>
+    <li><code>AuthRepository.kt</code> (로그인/토큰/sync)</li>
+    <li><code>SocketSessionManager.kt</code> (HI 핸드셰이크)</li>
+    <li><code>LoginViewModel.kt</code> (StateFlow)</li>
+    <li><code>MainActivity.kt</code> (<code>startProcess()</code>, <code>onLoginFromWeb()</code>)</li>
+</ul>
+
+<figure>
+    <img src="../assets/images/a.png" alt="로그인 흐름 원본">
+    <figcaption>원본 다이어그램 — 앱 시작 및 수동/자동 로그인 분기</figcaption>
+</figure>
+
+<div class="page-nav">
+    <a href="../api/binary.html" class="prev">Binary Protocol</a>
+    <a href="initial-sync.html" class="next">초기 Sync 체인</a>
+</div>
+
+</main></div></body></html>

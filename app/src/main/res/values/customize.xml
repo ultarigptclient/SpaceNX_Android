@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources xmlns:tools="http://schemas.android.com/tools" tools:ignore="MissingTranslation">
+    <item name="UseMessageCcType" type="string">0</item>
+    <item name="UseCheckBinderCustom" type="string">Y</item>
+    <item name="UseReactionCustom" type="string">N</item>
+    <item name="UseSimpleChannelName" type="string">Y</item>
+    <item name="ConcurrentPosition" type="string">Y</item>
+    <item name="ChatSelectRowsPerOneTime" type="integer">10</item>
+    <item name="saveErrorLog" type="string">N</item>
+    <item name="UsePushBadge" type="string">N</item>
+    <item name="UseEmoticon" type="string">Y</item>
+    <item name="UseNotifyTab" type="string">N</item>
+    <item name="UseTalkTab" type="string">Y</item>
+    <item name="UseMessageTab" type="string">Y</item>
+    <item name="UseMCUTab" type="string">Y</item>
+    <item name="UseFileAttach" type="string">Y</item>
+    <item name="UseNotificationLargeIcon" type="string">Y</item>
+    <item name="UseBookMark" type="string">Y</item>
+    <item name="useFavoriteUserIconByTree" type="string">Y</item>
+    <item name="usePcState" type="string">N</item>
+    <item name="usePhoneState" type="string">Y</item>
+    <item name="useFmcState" type="string">Y</item>
+    <item name="useIncomingCall" type="string">Y</item>
+    <item name="UseMyNote" type="string">Y</item>
+    <item name="UseMyChatting" type="string">Y</item>
+    <item name="UseChatRoomUserDetail" type="string">Y</item>
+    <item name="UseChatAlbumView" type="string">N</item>
+    <item name="maxAttachFileSize" type="string">30</item>
+    <item name="maxAttachFileMessage" type="string">(최대 30MB)</item>
+    <item name="emoticonVersion" type="string">1.2</item>
+    <item name="emoticonTabDividerColor" type="string">#33242424</item>
+    <item name="soundVersion" type="string">0.9</item>
+</resources>

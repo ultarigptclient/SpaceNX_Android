@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<title>05. Bridge & Handlers — Hybrid-Talk v2</title>
+<link rel="stylesheet" href="assets/style.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/kotlin.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<script>mermaid.initialize({startOnLoad:true,theme:'dark'});window.addEventListener('DOMContentLoaded',()=>hljs.highlightAll());</script>
+</head>
+<body>
+<div class="layout">
+
+<aside class="sidebar">
+    <h1>Hybrid-Talk v2</h1>
+    <div class="group"><div class="group-title">Overview</div><nav>
+        <a href="index.html">시작하기</a>
+        <a href="01-overview.html">전체 흐름도 &amp; 구조</a>
+        <a href="02-communication.html">통신 구조 (3축)</a>
+    </nav></div>
+    <div class="group"><div class="group-title">Architecture</div><nav>
+        <a href="03-session-login.html">세션 &amp; 로그인 흐름</a>
+        <a href="04-di.html">Dependency Injection</a>
+        <a href="05-bridge-handlers.html" class="active">Bridge &amp; Handlers</a>
+        <a href="06-data-layer.html">Data Layer &amp; Repository</a>
+    </nav></div>
+    <div class="group"><div class="group-title">Data</div><nav>
+        <a href="data/index.html">DB 개요 &amp; ER</a>
+        <a href="data/org-db.html">org.db</a>
+        <a href="data/chat-db.html">chat.db</a>
+        <a href="data/message-db.html">message.db</a>
+        <a href="data/noti-db.html">noti.db</a>
+        <a href="data/project-db.html">project.db</a>
+        <a href="data/common-setting.html">common / setting</a>
+    </nav></div>
+    <div class="group"><div class="group-title">API</div><nav>
+        <a href="api/rest.html">REST API</a>
+        <a href="api/binary.html">Binary Protocol</a>
+    </nav></div>
+    <div class="group"><div class="group-title">Flows</div><nav>
+        <a href="flows/login.html">로그인 시퀀스</a>
+        <a href="flows/initial-sync.html">초기 Sync 체인</a>
+        <a href="flows/chat-send.html">채팅 송수신</a>
+        <a href="flows/push-event.html">Push 이벤트</a>
+        <a href="flows/thread.html">말풍선↔스레드↔이슈</a>
+    </nav></div>
+</aside>
+
+<main class="content">
+
+<h1>05. Bridge &amp; Handlers</h1>
+<p class="lead">
+    React SPA가 네이티브와 통신하는 유일한 진입점입니다.
+    새 기능을 추가할 때 거의 반드시 건드리는 부분이라 개발 중 가장 자주 보게 될 페이지입니다.
+</p>
+
+<h2>1. 구성 요소</h2>
+
+<table>
+    <tr><th>파일</th><th>역할</th></tr>
+    <tr><td><code>ui/bridge/WebAppBridge.kt</code></td><td>@JavascriptInterface 진입점 (<code>AndroidBridge</code>)</td></tr>
+    <tr><td><code>ui/bridge/BridgeDispatcher.kt</code></td><td>거대한 <code>when(action)</code> 블록 — 라우팅</td></tr>
+    <tr><td><code>ui/bridge/BridgeContext.kt</code></td><td>Handler 공통 인터페이스 (Repository·Config·JS 통신 유틸 제공)</td></tr>
+    <tr><td><code>ui/bridge/handler/*.kt</code></td><td>8개 도메인 Handler</td></tr>
+</table>
+
+<h3>8개 Handler</h3>
+<table>
+    <tr><th>Handler</th><th>담당 도메인</th><th>주요 액션</th></tr>
+    <tr><td><code>AppHandler</code></td><td>앱 상태·로그인·권한·디바이스 sync</td><td><code>getClientState</code>, <code>saveCredential</code>, <code>getUserConfig</code>, <code>broadcastTheme</code></td></tr>
+    <tr><td><code>OrgHandler</code></td><td>조직도·버디·구독</td><td><code>getOrgList</code>, <code>getOrgSubList</code>, <code>searchUsers</code>, <code>syncBuddy</code></td></tr>
+    <tr><td><code>ChannelActionHandler</code></td><td>채널/방 생성·멤버 관리</td><td><code>createChatRoom</code>, <code>addChannelMember</code>, <code>createConference</code></td></tr>
+    <tr><td><code>ChatHandler</code></td><td>채팅 CRUD·반응·투표·핀</td><td><code>getChatList</code>, <code>sendChat</code>, <code>toggleReaction</code>, <code>pinMessage</code></td></tr>
+    <tr><td><code>MessageHandler</code></td><td>쪽지 CRUD·sync·count</td><td><code>sendMessage</code>, <code>syncMessage</code>, <code>retrieveMessage</code></td></tr>
+    <tr><td><code>NotiHandler</code></td><td>알림</td><td><code>syncNoti</code>, <code>readNoti</code>, <code>getNotiCounts</code></td></tr>
+    <tr><td><code>FileHandler</code></td><td>파일 업/다운로드</td><td><code>uploadFile</code>, <code>pickFile</code>, <code>downloadFile</code></td></tr>
+    <tr><td><code>NeoSendHandler</code></td><td>범용 REST 포워딩 (fallback)</td><td><code>neoSend</code>, <code>httpRequest</code>, <code>apiPost</code></td></tr>
+</table>
+
+<h2>2. 라우팅 라이프사이클</h2>
+
+<div class="mermaid">
+sequenceDiagram
+    participant JS
+    participant WB as WebAppBridge
+    participant BD as BridgeDispatcher
+    participant H as 해당 Handler
+    participant Repo
+    participant API as REST/Socket
+    participant CTX as BridgeContext
+
+    JS->>WB: AndroidBridge.postMessage('{"action":"sendChat","channelCode":"C1",...}')
+    WB->>WB: JSON 파싱 → action + params:Map
+    WB->>BD: dispatch(action, params)
+    BD->>BD: activity.runOnUiThread { when(action) }
+    BD->>H: scope.launch { handler.handle(action, params) }
+    H->>Repo: channelRepo.sendChat(...)
+    Repo->>API: REST or Socket
+    API-->>Repo: 응답
+    Repo-->>H: result
+    H->>CTX: resolveToJs("sendChat", result)
+    CTX->>JS: evalJs("window._sendChatResolve('{...}')")
+</div>
+
+<h2>3. <code>BridgeDispatcher.kt</code> 분기 구조</h2>
+
+<p>한 개의 거대한 <code>when</code> 블록으로 라우팅. 비슷한 도메인은 그룹으로 묶음.</p>
+
+<pre><code class="language-kotlin">fun dispatch(action: String, params: Map&lt;String, Any?&gt; = emptyMap()) {
+    activity.runOnUiThread {
+        when (action) {
+            // ── 앱/윈도우 ──
+            "finishApp", "closeApp", "closeWindow" -&gt; activity.finish()
+            "updateStatusBar" -&gt; activity.onUpdateStatusBarFromWeb(paramStr(params, "hex"))
+
+            // ── 인증 ──
+            "login" -&gt; activity.onLoginFromWeb(paramStr(params, "userId"), paramStr(params, "password"))
+            "logout" -&gt; { completedSyncs.clear(); userNameCache.clear(); activity.requestLogout() }
+            "saveCredential" -&gt; scope.launch { appHandler.handleSaveCredential(params) }
+
+            // ── 조직/버디 ──
+            "getOrgList", "getOrgSubList", "searchUsers", "openUserDetail",
+            "syncBuddy", "addUserToMyList", "getMyPart"
+                -&gt; scope.launch { orgHandler.handle(action, params) }
+
+            // ── 채널 관리 ──
+            "syncChannel", "getChannelList", "createChatRoom", /* ... */
+                -&gt; scope.launch { channelActionHandler.handle(action, params) }
+
+            // ── 채팅 ──
+            "getChatList", "sendChat", "readChat", "deleteChat", "modChat",
+            "toggleReaction", "addLocalSystemChat", "toggleVote", "closeVote",
+            "pinMessage", "unpinMessage", "getUnreadCount"
+                -&gt; scope.launch { chatHandler.handle(action, params) }
+
+            // ── REST 단순 포워딩 ──
+            "destroyChannel" -&gt; scope.launch { handleRestForward("destroyChannel", "/comm/destroychannel", params) }
+            "typingChat"     -&gt; scope.launch { handleRestForward("typingChat",     "/comm/typingchat", params) }
+
+            // ── 범용 REST ──
+            "apiPost", "neoSend", "httpRequest"
+                -&gt; scope.launch { neoSendHandler.handle(action, params) }
+
+            // ── 모바일 stub (의도적 no-op) ──
+            "makeCall", "transferCall" -&gt; scope.launch {
+                resolveToJs(action, JSONObject().put("errorCode", 0))
+            }
+
+            else -&gt; { rejectToJs(action, "Unhandled action: $action") }
+        }
+    }
+}</code></pre>
+
+<h2>4. <code>BridgeContext</code> — Handler 공통 인터페이스</h2>
+
+<p>각 Handler가 <code>BridgeDispatcher</code>에 직접 의존하지 않고, 필요한 기능만 인터페이스로 주입받습니다.</p>
+
+<pre><code class="language-kotlin">interface BridgeContext {
+    val activity: MainActivity
+    val appConfig: AppConfig
+    val dbProvider: DatabaseProvider
+    val scope: CoroutineScope
+    val userNameCache: UserNameCache
+    val loginViewModel: LoginViewModel
+    var activeChannelCode: String?
+
+    // JS 통신
+    fun resolveToJs(action: String, data: JSONObject)
+    fun rejectToJs(action: String, errorMessage: String?)
+    fun evalJs(js: String)
+    fun notifyReact(event: String)
+
+    // 공통 헬퍼
+    fun guardDbNotReady(action: String): Boolean
+    suspend fun handleRestForward(action: String, path: String, params: Map&lt;String, Any?&gt;)
+    suspend fun updateCrudOffset(commandName: String, response: JSONObject)
+    fun paramStr(params: Map&lt;String, Any?&gt;, key: String): String
+    fun paramInt(params: Map&lt;String, Any?&gt;, key: String, default: Int = 0): Int
+    // ...
+}</code></pre>
+
+<h2>5. Handler 작성 패턴</h2>
+
+<p>새 액션을 추가할 때는 대부분 이 템플릿을 따릅니다:</p>
+
+<pre><code class="language-kotlin">class ChatHandler(
+    private val ctx: BridgeContext,
+    private val channelRepo: ChannelRepository
+) {
+    suspend fun handle(action: String, params: Map&lt;String, Any?&gt;) {
+        when (action) {
+            "sendChat" -&gt; handleSendChat(params)
+            "getUnreadCount" -&gt; handleGetUnreadCount(params)
+            // ...
+        }
+    }
+
+    private suspend fun handleGetUnreadCount(params: Map&lt;String, Any?&gt;) {
+        if (ctx.guardDbNotReady("getUnreadCount")) return
+        val channelCode = ctx.paramStr(params, "channelCode")
+        val myUserId = ctx.appConfig.getSavedUserId().orEmpty()
+        if (channelCode.isEmpty() || myUserId.isEmpty()) {
+            ctx.rejectToJs("getUnreadCount", "missing channelCode or userId")
+            return
+        }
+        try {
+            val count = withContext(Dispatchers.IO) {
+                val chatDb = ctx.dbProvider.getChatDatabase()
+                val offsetDate = chatDb.channelOffsetDao().get(channelCode, myUserId)?.offsetDate ?: 0L
+                chatDb.chatDao().countUnread(channelCode, offsetDate, myUserId)
+            }
+            ctx.resolveToJs("getUnreadCount", JSONObject()
+                .put("errorCode", 0)
+                .put("channelCode", channelCode)
+                .put("unreadCount", count))
+        } catch (e: Exception) {
+            ctx.rejectToJs("getUnreadCount", e.message)
+        }
+    }
+}</code></pre>
+
+<h2>6. 새 액션 추가 체크리스트</h2>
+
+<div class="callout ok">
+    <strong>새 액션 추가 절차</strong>
+    <ol>
+        <li><code>BridgeDispatcher.kt</code>의 적절한 그룹에 액션 이름 추가 (chat 관련이면 chatHandler 그룹, 단순 REST면 <code>handleRestForward</code>)</li>
+        <li>해당 Handler의 <code>when</code>-블록에 case 추가</li>
+        <li><code>handleXxx(params)</code> 메서드 구현
+            <ul>
+                <li><code>guardDbNotReady</code>로 DB 준비 체크</li>
+                <li><code>paramStr/Int/Long</code>으로 파라미터 추출</li>
+                <li><code>Dispatchers.IO</code>에서 Repository 호출</li>
+                <li><code>resolveToJs</code> / <code>rejectToJs</code>로 응답</li>
+            </ul>
+        </li>
+        <li><code>docs/bridge-matrix.md</code>에 항목 업데이트 (또는 <code>tools\gen-bridge-matrix.bat</code> 실행)</li>
+        <li><code>nx</code> 프론트엔드의 <code>bridge.js</code>에 JS 측 래퍼 추가 (다른 팀에 알림)</li>
+    </ol>
+</div>
+
+<h2>7. 응답 형식 컨벤션</h2>
+
+<table>
+    <tr><th>상태</th><th>JS 수신 함수</th><th>JSON 구조</th></tr>
+    <tr><td>성공</td><td><code>window._${action}Resolve</code></td><td><code>{errorCode:0, ...data}</code></td></tr>
+    <tr><td>실패</td><td><code>window._${action}Reject</code></td><td><code>{errorCode:-1, errorMessage:"..."}</code></td></tr>
+    <tr><td>Stub (의도적 no-op)</td><td><code>window._${action}Resolve</code></td><td><code>{errorCode:0}</code></td></tr>
+</table>
+
+<h2>8. Push 이벤트 역방향 브릿지</h2>
+
+<p>Socket이나 FCM으로 Push 이벤트가 들어오면 <code>PushEventHandler</code>가 DB에 반영 후 Web에 <strong><code>postMessage</code></strong>로 전달합니다. 이건 resolve/reject가 아닌 <strong>전역 이벤트</strong>입니다.</p>
+
+<pre><code class="language-kotlin">fun forwardPushToReact(command: String, data: JSONObject) {
+    // additional null 방지
+    if (!data.has("additional")) data.put("additional", JSONObject())
+    val pushMsg = JSONObject().put("event", "neoPush").put("command", command).put("data", data)
+    evalJsMain("window.postMessage('${esc(pushMsg.toString())}')")
+}</code></pre>
+
+<pre><code class="language-javascript">// Web 측
+window.addEventListener('message', (e) => {
+    const msg = JSON.parse(e.data);
+    if (msg.event === 'neoPush' &amp;&amp; msg.command === 'SendChatEvent') {
+        // 새 메시지 UI 반영
+    }
+});</code></pre>
+
+<h2>9. Bridge 매트릭스 (전체 액션 ↔ Android)</h2>
+
+<p>명세(<code>bridge-flow.html</code>) 카드 ↔ Android 구현 대조표는 별도로 자동 생성됩니다:</p>
+
+<ul>
+    <li>수동 큐레이션본: <a href="../bridge-matrix.md"><code>docs/bridge-matrix.md</code></a></li>
+    <li>자동 생성본: <a href="../bridge-matrix.auto.md"><code>docs/bridge-matrix.auto.md</code></a></li>
+    <li>재생성: <code>tools/gen-bridge-matrix.bat</code></li>
+</ul>
+
+<div class="page-nav">
+    <a href="04-di.html" class="prev">04. DI</a>
+    <a href="06-data-layer.html" class="next">06. Data Layer</a>
+</div>
+
+</main>
+</div>
+</body>
+</html>

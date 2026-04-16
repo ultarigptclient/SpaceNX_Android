@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<title>06. Data Layer & Repository — Hybrid-Talk v2</title>
+<link rel="stylesheet" href="assets/style.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/kotlin.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<script>mermaid.initialize({startOnLoad:true,theme:'dark'});window.addEventListener('DOMContentLoaded',()=>hljs.highlightAll());</script>
+</head>
+<body>
+<div class="layout">
+
+<aside class="sidebar">
+    <h1>Hybrid-Talk v2</h1>
+    <div class="group"><div class="group-title">Overview</div><nav>
+        <a href="index.html">시작하기</a>
+        <a href="01-overview.html">전체 흐름도 &amp; 구조</a>
+        <a href="02-communication.html">통신 구조 (3축)</a>
+    </nav></div>
+    <div class="group"><div class="group-title">Architecture</div><nav>
+        <a href="03-session-login.html">세션 &amp; 로그인 흐름</a>
+        <a href="04-di.html">Dependency Injection</a>
+        <a href="05-bridge-handlers.html">Bridge &amp; Handlers</a>
+        <a href="06-data-layer.html" class="active">Data Layer &amp; Repository</a>
+    </nav></div>
+    <div class="group"><div class="group-title">Data</div><nav>
+        <a href="data/index.html">DB 개요 &amp; ER</a>
+        <a href="data/org-db.html">org.db</a>
+        <a href="data/chat-db.html">chat.db</a>
+        <a href="data/message-db.html">message.db</a>
+        <a href="data/noti-db.html">noti.db</a>
+        <a href="data/project-db.html">project.db</a>
+        <a href="data/common-setting.html">common / setting</a>
+    </nav></div>
+    <div class="group"><div class="group-title">API</div><nav>
+        <a href="api/rest.html">REST API</a>
+        <a href="api/binary.html">Binary Protocol</a>
+    </nav></div>
+    <div class="group"><div class="group-title">Flows</div><nav>
+        <a href="flows/login.html">로그인 시퀀스</a>
+        <a href="flows/initial-sync.html">초기 Sync 체인</a>
+        <a href="flows/chat-send.html">채팅 송수신</a>
+        <a href="flows/push-event.html">Push 이벤트</a>
+        <a href="flows/thread.html">말풍선↔스레드↔이슈</a>
+    </nav></div>
+</aside>
+
+<main class="content">
+
+<h1>06. Data Layer &amp; Repository</h1>
+<p class="lead">
+    Room + SQLCipher 기반 로컬 DB, Retrofit REST, Binary Socket 세 소스를 Repository가 종합합니다.
+    이 페이지는 레이어 전체 그림과 Repository 역할 분담을 설명합니다. DB 스키마 상세는 <a href="data/index.html">Data 섹션</a>을.
+</p>
+
+<h2>1. 레이어 전체 그림</h2>
+
+<div class="mermaid">
+flowchart TD
+    UI[UI / Bridge Handler]
+    VM[ViewModel]
+    R[Repository]
+    DAO["Room DAO"]
+    DB[("SQLCipher-encrypted Room DB")]
+    API["Retrofit API"]
+    S[SocketSessionManager]
+
+    UI --> R
+    VM --> R
+    R --> DAO
+    DAO --> DB
+    R --> API
+    R --> S
+</div>
+
+<h2>2. Repository 목록과 역할</h2>
+
+<table>
+    <tr><th>Repository</th><th>주 DB</th><th>담당</th></tr>
+    <tr><td><code>AuthRepository</code></td><td>—</td><td>REST 로그인, 토큰 갱신, syncConfig, 소켓 연결</td></tr>
+    <tr><td><code>OrgRepository</code></td><td>org.db</td><td>부서/유저 sync, 조직도 조회</td></tr>
+    <tr><td><code>BuddyRepository</code></td><td>org.db</td><td>내 목록(버디) sync, 추가/삭제</td></tr>
+    <tr><td><code>ChannelRepository</code></td><td>chat.db</td><td>채널 CRUD, 멤버, 채팅 sync + 조회 (908줄, 분할 필요)</td></tr>
+    <tr><td><code>MessageRepository</code></td><td>message.db</td><td>쪽지 sync, CRUD, prefetch, mutex (552줄)</td></tr>
+    <tr><td><code>NotiRepository</code></td><td>noti.db</td><td>알림 sync, 읽음, 삭제</td></tr>
+    <tr><td><code>ProjectRepository</code></td><td>project.db</td><td>프로젝트/이슈/스레드/댓글/할일/캘린더 (통합)</td></tr>
+    <tr><td><code>StatusRepository</code></td><td>—</td><td>Presence 설정, 상태 메시지</td></tr>
+    <tr><td><code>PubSubRepository</code></td><td>—</td><td>Presence 구독/해제 (Socket 기반)</td></tr>
+    <tr><td><code>UserNameCache</code></td><td>org.db</td><td>userId → userName 메모리 캐시</td></tr>
+    <tr><td><code>SocketSessionManager</code></td><td>—</td><td>소켓 생명주기 (실질 Repository 역할)</td></tr>
+    <tr><td><code>PushEventHandler</code></td><td>전체</td><td>Binary Push 프레임 → 로컬 DB 반영 → Web 전달</td></tr>
+</table>
+
+<h2>3. Room + SQLCipher</h2>
+
+<h3>3-1. 6개 DB 분리</h3>
+<table>
+    <tr><th>DB</th><th>파일명</th><th>범위</th><th>주요 엔티티</th></tr>
+    <tr><td>common</td><td>common.db</td><td>전역 (로그인 전/후 모두)</td><td>CommonEntity, SyncMetaEntity</td></tr>
+    <tr><td>org</td><td>org_{userId}.db</td><td>사용자별</td><td>DeptEntity, UserEntity, BuddyEntity</td></tr>
+    <tr><td>chat</td><td>chat_{userId}.db</td><td>사용자별</td><td>ChannelEntity, ChannelMember, ChannelOffset, ChatEntity, ChatEventEntity</td></tr>
+    <tr><td>message</td><td>message_{userId}.db</td><td>사용자별</td><td>MessageEntity, AttachEntity, MessageEventEntity</td></tr>
+    <tr><td>noti</td><td>noti_{userId}.db</td><td>사용자별</td><td>NotiEntity, NotiEventEntity</td></tr>
+    <tr><td>setting</td><td>setting_{userId}.db</td><td>사용자별</td><td>SettingEntity</td></tr>
+    <tr><td>project</td><td>project_{userId}.db</td><td>사용자별</td><td>ProjectEntity, IssueEntity, ChatThreadEntity, ThreadCommentEntity 등</td></tr>
+</table>
+
+<h3>3-2. 암호화</h3>
+<ul>
+    <li>모든 DB는 SQLCipher로 암호화</li>
+    <li>Passphrase: <code>AmCodec.decryptSeed()</code>로 앱/디바이스 고유 값에서 유도</li>
+    <li><code>HybridWebMessengerApp.onCreate()</code>에서 미리 <code>warmUpPassphrase()</code> 호출 (첫 DB 접근 지연 방지)</li>
+</ul>
+
+<h3>3-3. 마이그레이션 정책</h3>
+<div class="callout warn">
+    현재 모든 DB가 <code>fallbackToDestructiveMigration()</code> 사용 중. <strong>스키마 변경 시 기존 데이터가 전부 날아갑니다.</strong>
+    개발 단계에서는 OK지만, 프로덕션 배포 시점에는 <code>Migration</code> 구현 필요.
+</div>
+
+<h2>4. Repository 패턴 예시</h2>
+
+<h3>4-1. sync 흐름 (REST → Room)</h3>
+<pre><code class="language-kotlin">suspend fun syncChat(userId: String): JSONObject {
+    val lastSyncTime = commonDao.getSyncMeta("chat_last_sync_time")?.value?.toLongOrNull() ?: 0L
+    val body = JSONObject().apply {
+        put("userId", userId)
+        put("lastSyncTime", lastSyncTime)
+    }
+
+    val response = ApiClient.postJson(
+        appConfig.getEndpointByPath("/comm/syncchat"),
+        body,
+        appConfig.getSavedToken()
+    )
+
+    // DB 반영
+    val chats = response.optJSONArray("chats") ?: return response
+    val entities = (0 until chats.length()).map {
+        ChatEntity.fromJson(chats.getJSONObject(it))
+    }
+    withContext(Dispatchers.IO) {
+        chatDao.insertAll(entities)
+    }
+
+    // lastSyncTime 갱신
+    val newTime = response.optLong("lastSyncTime", System.currentTimeMillis())
+    commonDao.upsertSyncMeta(SyncMetaEntity("chat_last_sync_time", newTime.toString()))
+
+    return response
+}</code></pre>
+
+<h3>4-2. Push 이벤트 → Room 적용</h3>
+<pre><code class="language-kotlin">// PushEventHandler.handleSendChatEvent
+private suspend fun handleSendChatEvent(data: JSONObject) {
+    val chat = ChatEntity.fromJson(data)
+    dbProvider.getChatDatabase().chatDao().upsert(chat)
+
+    // unreadCount 재계산
+    channelRepo.recalcChannelUnread(chat.channelCode)
+
+    // React에 전달
+    forwardPushToReact("SendChatEvent", data)
+}</code></pre>
+
+<h2>5. 주요 동시성 패턴</h2>
+
+<table>
+    <tr><th>패턴</th><th>사용 위치</th><th>목적</th></tr>
+    <tr><td><code>CompletableDeferred</code></td><td><code>jwtTokenDeferred</code>, <code>hiCompletedDeferred</code></td><td>토큰/HI 완료 대기</td></tr>
+    <tr><td><code>MutableSharedFlow</code></td><td><code>PubSubRepository</code></td><td>Presence 이벤트 구독</td></tr>
+    <tr><td><code>StateFlow</code></td><td><code>LoginViewModel</code></td><td>로그인 상태 브로드캐스트</td></tr>
+    <tr><td><code>Mutex</code></td><td><code>MessageRepository</code></td><td>sync 중복 방지</td></tr>
+    <tr><td><code>loginSessionScope</code></td><td><code>AuthRepository</code></td><td>로그인 세션 코루틴 묶음 관리</td></tr>
+</table>
+
+<h2>6. 오프셋/이벤트 기반 sync 개념</h2>
+
+<p>채팅/쪽지/알림은 "마지막 동기화 이후의 변경분만 가져오기" 전략을 씁니다.</p>
+
+<div class="mermaid">
+flowchart LR
+    A["앱 시작 / sync 진입"] --> B["commonDao에서<br/>lastSyncTime or lastEventId 조회"]
+    B --> C["서버에 POST<br/>/sync{도메인} {userId, lastXxx}"]
+    C --> D["응답: {items:[...], newLastXxx}"]
+    D --> E["Room upsertAll(items)"]
+    E --> F["commonDao.upsertSyncMeta(newLastXxx)"]
+    F --> G["notifyReact('{domain}Ready')"]
+</div>
+
+<p>각 Entity의 offset 갱신은 <code>updateCrudOffset()</code> 공용 헬퍼에서 처리합니다 (<code>BridgeContext</code>에 노출).</p>
+
+<h2>7. REST + Socket 이원 운영 패턴</h2>
+
+<p>같은 명령에 대해 REST와 Socket을 둘 다 쓰는 경우 (예: <code>changeStatus</code>). 순서는 설정으로 결정:</p>
+
+<pre><code class="language-kotlin">"changeStatus" -&gt; scope.launch {
+    val success = if (PRESENCE_REST_PRIORITY) {
+        tryRest() || trySocket()
+    } else {
+        trySocket() || tryRest()
+    }
+    // 성공 시 본인 상태 즉시 반영 (서버는 본인에게 ICON_EVENT 안 보냄)
+}</code></pre>
+
+<h2>8. 캐시 전략</h2>
+
+<ul>
+    <li><strong>UserNameCache</strong> — userId → userName 메모리 맵. org.db에 없을 때 buddy.db에서 fallback</li>
+    <li><strong>activeChannelCode</strong> — 현재 열린 채널을 <code>BridgeContext</code>에 보관 (in-app 알림 억제용)</li>
+    <li><strong>configCache</strong> — <code>AppConfig</code>에 서버 설정 전체를 메모리 맵으로 유지 (REST 엔드포인트 등)</li>
+</ul>
+
+<h2>9. 로그아웃 시 데이터 처리</h2>
+
+<p>현재는 SQLCipher DB 파일은 유지하되, 메모리 캐시만 초기화합니다. 다른 사용자로 로그인하면 <code>chat_{userId}.db</code> 파일이 새로 열립니다.</p>
+
+<pre><code class="language-kotlin">// AuthRepository.requestLogout()
+sessionManager.disconnect()
+appConfig.clearTokens()         // access/refresh 토큰만 삭제
+userNameCache.clear()
+channelRepo.clearMemoryCache()
+// DB 파일은 유지 — 같은 사용자 재로그인 시 빠르게 진입
+</code></pre>
+
+<div class="page-nav">
+    <a href="05-bridge-handlers.html" class="prev">05. Bridge &amp; Handlers</a>
+    <a href="data/index.html" class="next">Data: DB 개요 &amp; ER</a>
+</div>
+
+</main>
+</div>
+</body>
+</html>

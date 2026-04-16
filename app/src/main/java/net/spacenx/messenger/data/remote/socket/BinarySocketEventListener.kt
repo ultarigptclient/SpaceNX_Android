@@ -1,0 +1,13 @@
+package net.spacenx.messenger.data.remote.socket
+
+import net.spacenx.messenger.data.remote.socket.codec.BinaryFrameCodec
+
+/**
+ * 바이너리 프로토콜 소켓 이벤트 콜백
+ */
+interface BinarySocketEventListener {
+    fun onConnected()
+    fun onFrameReceived(frame: BinaryFrameCodec.BinaryFrame)
+    fun onDisconnected()
+    fun onError(error: Throwable)
+}
