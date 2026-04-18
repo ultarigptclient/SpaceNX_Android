@@ -18,6 +18,10 @@ interface ChannelOffsetDao {
     @Query("SELECT * FROM channelOffsets WHERE channelCode = :channelCode")
     suspend fun getByChannel(channelCode: String): List<ChannelOffsetEntity>
 
+    /** 배치 조회: 여러 채널의 offset 을 1쿼리로. caller 가 channelCode 별로 group by. */
+    @Query("SELECT * FROM channelOffsets WHERE channelCode IN (:channelCodes)")
+    suspend fun getForChannels(channelCodes: List<String>): List<ChannelOffsetEntity>
+
     @Query("SELECT * FROM channelOffsets WHERE channelCode = :channelCode AND userId = :userId")
     suspend fun getOffset(channelCode: String, userId: String): ChannelOffsetEntity?
 

@@ -6,6 +6,7 @@ import kotlinx.coroutines.withContext
 import net.spacenx.messenger.common.AppConfig
 import net.spacenx.messenger.data.local.DatabaseProvider
 import net.spacenx.messenger.data.local.entity.ChannelMemberEntity
+import net.spacenx.messenger.service.socket.SocketSessionManager
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -34,12 +35,22 @@ class ChannelQueryRepository(
             val orgDb = databaseProvider.getOrgDatabase()
             val myUserId = databaseProvider.getCurrentUserId() ?: ""
             val allChannels = chatDb.channelDao().getAll()
+            val allCodes = allChannels.map { it.channelCode }
 
-            val channelMembersMap = mutableMapOf<String, List<ChannelMemberEntity>>()
+            // N+1 제거: 멤버/offset 을 채널 단위 루프 대신 한 번의 IN 쿼리로 일괄 조회 후 in-memory group by.
+            // 채널 50개 + 멤버 평균 5명 기준 100+ 쿼리 → 2 쿼리.
+            val channelMembersMap: Map<String, List<ChannelMemberEntity>> = if (allCodes.isNotEmpty())
+                chatDb.channelMemberDao().getActiveMembersForChannels(allCodes).groupBy { it.channelCode }
+            else emptyMap()
+            val offsetsByChannel: Map<String, Map<String, Long>> = if (allCodes.isNotEmpty())
+                chatDb.channelOffsetDao().getForChannels(allCodes)
+                    .groupBy { it.channelCode }
+                    .mapValues { entry -> entry.value.associate { it.userId to it.offsetDate } }
+            else emptyMap()
+
             val dmKeyToBestCode = mutableMapOf<String, Pair<String, Long>>()
             for (channel in allChannels) {
-                val members = chatDb.channelMemberDao().getActiveMembersByChannel(channel.channelCode)
-                channelMembersMap[channel.channelCode] = members
+                val members = channelMembersMap[channel.channelCode] ?: emptyList()
                 if (channel.channelType == "DM" && members.size == 2) {
                     val key = members.map { it.userId }.sorted().joinToString("|")
                     val prev = dmKeyToBestCode[key]
@@ -64,8 +75,7 @@ class ChannelQueryRepository(
                     if (bestCode != null && bestCode != channel.channelCode) continue
                 }
 
-                val offsetMap = chatDb.channelOffsetDao().getByChannel(channel.channelCode)
-                    .associate { it.userId to it.offsetDate }
+                val offsetMap = offsetsByChannel[channel.channelCode] ?: emptyMap()
                 val unreadCount = if (myUserId.isNotEmpty()) {
                     val myOffsetDate = offsetMap[myUserId] ?: 0L
                     chatDb.chatDao().countUnread(channel.channelCode, myOffsetDate, myUserId)

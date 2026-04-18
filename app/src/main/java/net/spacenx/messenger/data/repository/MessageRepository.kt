@@ -21,9 +21,12 @@ import net.spacenx.messenger.data.local.entity.MessageEntity
 import net.spacenx.messenger.data.local.entity.MessageEventEntity
 import net.spacenx.messenger.data.local.entity.SyncMetaEntity
 import net.spacenx.messenger.data.remote.api.ApiClient
+import net.spacenx.messenger.service.socket.SocketSessionManager
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import net.spacenx.messenger.data.local.SyncLocks
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -50,7 +53,7 @@ class MessageRepository(
     suspend fun syncMessage(): Map<String, Any> {
         if (!syncMutex.tryLock()) { Log.d(TAG, "syncMessage already in progress, skipping"); return mapOf("errorCode" to 0, "skipped" to true) }
         try {
-        return withContext(Dispatchers.IO) {
+        return SyncLocks.messageDbMutex.withLock { withContext(Dispatchers.IO) {
             try {
                 val token = awaitToken()
                 val messageDb = dbProvider.getMessageDatabase()
@@ -226,7 +229,7 @@ class MessageRepository(
                 FileLogger.log(TAG, "syncMessage ERROR ${e.message}")
                 mapOf<String, Any>("errorCode" to -1, "errorMessage" to (e.message ?: "Unknown error"))
             }
-        }
+        } }
         } finally { syncMutex.unlock() }
     }
 

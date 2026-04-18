@@ -14,6 +14,7 @@ import net.spacenx.messenger.data.local.entity.SyncMetaEntity
 import net.spacenx.messenger.data.remote.api.ApiClient
 import net.spacenx.messenger.data.remote.api.dto.MakeChannelRequestDTO
 import net.spacenx.messenger.data.remote.api.dto.SendChatRequestDTO
+import net.spacenx.messenger.service.socket.SocketSessionManager
 import org.json.JSONObject
 
 /**

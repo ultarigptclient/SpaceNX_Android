@@ -1,6 +1,10 @@
-package net.spacenx.messenger.data.repository
+package net.spacenx.messenger.service.push
 
 import android.util.Log
+import net.spacenx.messenger.data.repository.ChannelRepository
+import net.spacenx.messenger.data.repository.EventDedupCache
+import net.spacenx.messenger.data.repository.MessageRepository
+import net.spacenx.messenger.data.repository.NotiRepository
 import net.spacenx.messenger.common.AppConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -34,6 +38,27 @@ class PushEventHandler(
         private const val TAG = "PushEventHandler"
     }
 
+    // FCM ↔ socket 중복 이벤트 dedup. eventId 가 있으면 우선, 없으면 type-key 조합.
+    private val dedupCache = EventDedupCache(capacity = 2048)
+
+    /**
+     * 이벤트 dedup key 추출. server eventId 가 가장 정확하지만 일부 이벤트는
+     * eventId 가 없어 chatCode/messageCode/notiCode 같은 도메인 식별자를 사용한다.
+     * 빈 문자열을 반환하면 dedup 미적용 (always pass).
+     */
+    private fun dedupKeyFor(commandCode: Int, data: JSONObject): String {
+        val eventId = data.optLong("eventId", 0L)
+        if (eventId > 0) return "evt:$commandCode:$eventId"
+        // fallback: 도메인 식별자
+        val chatCode = data.optString("chatCode", "")
+        if (chatCode.isNotEmpty()) return "chat:$commandCode:$chatCode"
+        val messageCode = data.optString("messageCode", "")
+        if (messageCode.isNotEmpty()) return "msg:$commandCode:$messageCode"
+        val notiCode = data.optString("notiCode", "")
+        if (notiCode.isNotEmpty()) return "noti:$commandCode:$notiCode"
+        return ""
+    }
+
     /**
      * Push 이벤트를 commandCode에 따라 로컬 DB에 반영한다.
      *
@@ -41,6 +66,12 @@ class PushEventHandler(
      * @param data push 이벤트 JSON payload
      */
     suspend fun applyToLocalDb(commandCode: Int, data: JSONObject) {
+        // FCM + socket 양쪽 동시 수신 dedup. seen() 가 true 면 첫 수신, false 면 이미 처리됨.
+        val dedupKey = dedupKeyFor(commandCode, data)
+        if (dedupKey.isNotEmpty() && !dedupCache.seen(dedupKey)) {
+            Log.d(TAG, "applyToLocalDb: dedup skip key=$dedupKey")
+            return
+        }
         withContext(Dispatchers.IO) {
             try {
                 Log.d(TAG, "applyToLocalDb: commandCode=0x${Integer.toHexString(commandCode)}, data=$data")
@@ -128,17 +159,25 @@ class PushEventHandler(
             return
         }
 
-        val chatEntity = ChatEntity(
-            channelCode = channelCode,
-            chatCode = chatCode,
-            sendUserId = sendUserId,
-            contents = contents,
-            sendDate = sendDate,
-            chatType = chatType,
-            additional = additional
-        )
-
-        chatDb.chatDao().insert(chatEntity)
+        // 이중 저장 race 방어: 본인이 보낸 메시지는 ChatHandler.sendChat 의 REST 응답 경로에서
+        // 이미 chatDao().insert 로 저장됐을 가능성이 높음. push 가 같은 chatCode 로 다시 insert 하면
+        // REPLACE 전략에 의해 sendDate 가 server 시각 ↔ local fallback 시각으로 오락가락하는 race 가 발생.
+        // 이미 동일 chatCode 가 존재하면 chat insert 는 skip 하고 channel lastChat 갱신만 수행.
+        val alreadyExists = chatDb.chatDao().getByChatCode(chatCode) != null
+        if (alreadyExists) {
+            Log.d(TAG, "handleSendChatEvent: chatCode=$chatCode already in DB (likely REST self-send) — skipping chat insert")
+        } else {
+            val chatEntity = ChatEntity(
+                channelCode = channelCode,
+                chatCode = chatCode,
+                sendUserId = sendUserId,
+                contents = contents,
+                sendDate = sendDate,
+                chatType = chatType,
+                additional = additional
+            )
+            chatDb.chatDao().insert(chatEntity)
+        }
 
         // 로컬에 채널이 없으면 syncChannel로 채널 정보 가져오기 (일반 메시지 수신 fallback)
         val channel = existingChannel

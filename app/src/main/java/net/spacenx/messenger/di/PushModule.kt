@@ -11,7 +11,7 @@ import net.spacenx.messenger.data.local.DatabaseProvider
 import net.spacenx.messenger.data.repository.ChannelRepository
 import net.spacenx.messenger.data.repository.MessageRepository
 import net.spacenx.messenger.data.repository.NotiRepository
-import net.spacenx.messenger.data.repository.PushEventHandler
+import net.spacenx.messenger.service.push.PushEventHandler
 import net.spacenx.messenger.service.push.GroupNotificationManager
 import net.spacenx.messenger.service.push.NotificationGroupManager
 import javax.inject.Singleton

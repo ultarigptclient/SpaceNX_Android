@@ -12,9 +12,12 @@ import net.spacenx.messenger.data.local.DatabaseProvider
 import net.spacenx.messenger.data.local.entity.NotiEntity
 import net.spacenx.messenger.data.local.entity.SyncMetaEntity
 import net.spacenx.messenger.data.remote.api.ApiClient
+import net.spacenx.messenger.service.socket.SocketSessionManager
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import net.spacenx.messenger.data.local.SyncLocks
 import org.json.JSONObject
 
 /**
@@ -37,7 +40,7 @@ class NotiRepository(
     suspend fun syncNoti(): Map<String, Any> {
         if (!syncMutex.tryLock()) { Log.d(TAG, "syncNoti already in progress, skipping"); return mapOf("errorCode" to 0, "skipped" to true) }
         try {
-        return withContext(Dispatchers.IO) {
+        return SyncLocks.notiDbMutex.withLock { withContext(Dispatchers.IO) {
             try {
                 val token = awaitToken()
                 val notiDb = dbProvider.getNotiDatabase()
@@ -127,7 +130,7 @@ class NotiRepository(
                 FileLogger.log(TAG, "syncNoti ERROR ${e.message}")
                 mapOf<String, Any>("errorCode" to -1, "errorMessage" to (e.message ?: "Unknown error"))
             }
-        }
+        } }
         } finally { syncMutex.unlock() }
     }
 

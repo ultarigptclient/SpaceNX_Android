@@ -23,9 +23,8 @@ ksp = "2.1.10-1.0.29"
 sqlcipher = "4.6.1"
 kotlinxSerialization = "1.7.3"
 hilt = "2.56"
-# QUIC (옵션 B) — Flutter NeoQuicSocket 과 동일한 raw QUIC bidi stream (ALPN "neo", Gateway2:18029/UDP).
-# Maven Central: tech.kwik:kwik (agent15, hkdf, siphash 자동 transitive).
-kwik = "0.10.3"
+# 2026-04-18 kwik 0.10.x 제거. minSdk 31 로 올리고 WebTransport (Chromium/quiche) 단일 경로 사용.
+# kwik = "0.10.3"
 
 [libraries]
 hilt-android = { module = "com.google.dagger:hilt-android", version.ref = "hilt" }
@@ -57,7 +56,8 @@ kotlinx-coroutines-test = { group = "org.jetbrains.kotlinx", name = "kotlinx-cor
 androidx-test-core-ktx = { group = "androidx.test", name = "core-ktx", version.ref = "androidxTestCore" }
 mockk-android = { group = "io.mockk", name = "mockk-android", version.ref = "mockk" }
 sqlcipher-android = { module = "net.zetetic:sqlcipher-android", version.ref = "sqlcipher" }
-kwik = { module = "tech.kwik:kwik", version.ref = "kwik" }    # QUIC client (옵션 B)
+# 2026-04-18 kwik 제거됨 (minSdk 31 → WebTransport 단일).
+# kwik = { module = "tech.kwik:kwik", version.ref = "kwik" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

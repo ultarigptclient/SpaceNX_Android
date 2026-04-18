@@ -5,6 +5,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.launch
 import net.spacenx.messenger.data.remote.socket.codec.ProtocolCommand
+import net.spacenx.messenger.service.socket.SocketSessionManager
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.Collections

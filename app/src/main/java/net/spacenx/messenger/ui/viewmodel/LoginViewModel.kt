@@ -19,10 +19,10 @@ import net.spacenx.messenger.data.repository.NotiRepository
 import net.spacenx.messenger.data.repository.OrgRepository
 import net.spacenx.messenger.data.repository.ProjectRepository
 import net.spacenx.messenger.data.repository.PubSubRepository
-import net.spacenx.messenger.data.repository.PushEventHandler
-import net.spacenx.messenger.data.repository.SocketSessionManager
 import net.spacenx.messenger.data.repository.StatusRepository
-import net.spacenx.messenger.data.repository.UserNameCache
+import net.spacenx.messenger.data.cache.UserNameCache
+import net.spacenx.messenger.service.push.PushEventHandler
+import net.spacenx.messenger.service.socket.SocketSessionManager
 import net.spacenx.messenger.service.SessionService
 import net.spacenx.messenger.service.SyncService
 import org.json.JSONObject

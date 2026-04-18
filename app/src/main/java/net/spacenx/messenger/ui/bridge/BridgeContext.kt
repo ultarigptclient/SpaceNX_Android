@@ -3,7 +3,7 @@ package net.spacenx.messenger.ui.bridge
 import kotlinx.coroutines.CoroutineScope
 import net.spacenx.messenger.common.AppConfig
 import net.spacenx.messenger.data.local.DatabaseProvider
-import net.spacenx.messenger.data.repository.UserNameCache
+import net.spacenx.messenger.data.cache.UserNameCache
 import net.spacenx.messenger.ui.MainActivity
 import net.spacenx.messenger.ui.viewmodel.LoginViewModel
 import org.json.JSONObject

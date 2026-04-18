@@ -15,7 +15,10 @@ import net.spacenx.messenger.data.local.entity.SyncMetaEntity
 import net.spacenx.messenger.data.remote.api.ApiClient
 import net.spacenx.messenger.data.remote.api.dto.MyPartRequestDTO
 import net.spacenx.messenger.data.remote.api.dto.SyncBuddyRequestDTO
+import net.spacenx.messenger.service.socket.SocketSessionManager
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import net.spacenx.messenger.data.local.SyncLocks
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -120,7 +123,7 @@ class BuddyRepository(
                 val newOffset = json.optLong("buddyEventOffset", 0L)
 
                 // 단일 트랜잭션으로 DB 저장
-                orgDb.runInTransaction {
+                SyncLocks.orgDbMutex.withLock { orgDb.runInTransaction {
                     if (lastSyncTime == 0L && buddies.isNotEmpty()) {
                         orgDb.buddyDao().deleteAllSync()
                     }
@@ -142,7 +145,7 @@ class BuddyRepository(
                     if (newOffset > 0) {
                         orgDb.syncMetaDao().insertSync(SyncMetaEntity(SYNC_META_OFFSET_KEY, newOffset))
                     }
-                }
+                } }
 
                 Log.d(TAG, "syncBuddy complete: serverTime=$serverTime, offset=$newOffset, removed=${removedKeys.size}")
                 FileLogger.log(TAG, "syncBuddy DONE buddies=${buddies.size} removed=${removedKeys.size} newOffset=$newOffset")

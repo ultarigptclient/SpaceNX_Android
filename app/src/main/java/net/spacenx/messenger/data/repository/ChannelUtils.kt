@@ -3,6 +3,7 @@ package net.spacenx.messenger.data.repository
 import android.util.Log
 import kotlinx.coroutines.withTimeoutOrNull
 import net.spacenx.messenger.data.local.ChatDatabase
+import net.spacenx.messenger.service.socket.SocketSessionManager
 import org.json.JSONObject
 
 /**

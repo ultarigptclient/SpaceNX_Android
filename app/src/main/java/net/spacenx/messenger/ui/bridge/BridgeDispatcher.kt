@@ -16,6 +16,7 @@ import net.spacenx.messenger.data.local.entity.SyncMetaEntity
 import net.spacenx.messenger.data.remote.api.ApiClient
 import net.spacenx.messenger.data.repository.*
 import net.spacenx.messenger.data.repository.ProjectRepository
+import net.spacenx.messenger.data.cache.UserNameCache
 import net.spacenx.messenger.ui.MainActivity
 import net.spacenx.messenger.ui.bridge.handler.*
 import net.spacenx.messenger.ui.call.CallService
@@ -53,6 +54,46 @@ class BridgeDispatcher(
         // false = 바이너리 소켓 먼저 → 실패(소켓 미연결) 시 REST fallback
         // 2026-04-09
         const val PRESENCE_REST_PRIORITY = true
+
+        // ── 핸들러별 라우팅 셋 ──
+        // 새 액션을 핸들러에 추가할 때 dispatch() when 절을 건드리지 않고 이 셋만 수정.
+        // (#9 BridgeDispatcher actionMap prep — full Map 변환 대신 액션 inventory 만 외부화.)
+
+        private val ORG_HANDLER_ACTIONS = setOf(
+            "getOrgList", "getOrgSubList", "searchUsers", "openUserDetail",
+            "syncBuddy", "addUserToMyList", "getMyPart",
+            "addBuddy", "removeBuddy",
+            "addBuddyGroup", "deleteBuddyGroup", "renameBuddyGroup", "createSubGroup",
+        )
+        private val CHANNEL_HANDLER_ACTIONS = setOf(
+            "syncChannel", "getChannelList", "getChannelSummaries",
+            "createChatRoom", "createGroupChatRoom", "openChannel",
+            "addChannelMember", "removeChannelMember",
+            "addChannelFavorite", "removeChannelFavorite", "createConference",
+            "removeChannel", "findChannelByMembers", "getChannel",
+            "deleteRoom", "openChatRoom", "joinConference",
+        )
+        private val CHAT_HANDLER_ACTIONS = setOf(
+            "getChatList", "sendChat", "readChat", "deleteChat", "modChat", "toggleReaction",
+            "addLocalSystemChat",
+            "toggleVote", "closeVote", "pinMessage", "unpinMessage",
+            "getUnreadCount",
+        )
+        private val MESSAGE_HANDLER_ACTIONS = setOf(
+            "sendMessage", "readMessage", "deleteMessage", "syncMessage",
+            "fullSync", "loadMoreMessages", "getMessageDetail", "getMessageCounts",
+            "retrieveMessage",
+        )
+        private val FILE_HANDLER_ACTIONS = setOf(
+            "uploadFile", "pickFile", "downloadFile", "openFile", "relocateFiles",
+            "fileUploadPause", "fileUploadResume", "fileUploadCancel",
+            "fileDownloadPause", "fileDownloadResume", "fileDownloadCancel",
+            "previewFile", "shareFile",
+        )
+        private val NOTI_HANDLER_ACTIONS = setOf(
+            "syncNoti", "loadMoreNotis", "getNotiCounts", "readNoti",
+        )
+        private val NEOSEND_HANDLER_ACTIONS = setOf("apiPost", "neoSend", "httpRequest")
 
         /** neoSend REST fallback 매핑 */
         val NEOSEND_REST_MAP = mapOf(
@@ -175,46 +216,25 @@ class BridgeDispatcher(
                 "SetCredential" -> scope.launch { appHandler.handleSaveCredential(params) }
 
                 // ── 조직도 + 내목록 + 버디 관리 ──
-                "getOrgList", "getOrgSubList", "searchUsers", "openUserDetail",
-                "syncBuddy", "addUserToMyList", "getMyPart",
-                "addBuddy", "removeBuddy",
-                "addBuddyGroup", "deleteBuddyGroup", "renameBuddyGroup", "createSubGroup"
-                    -> scope.launch { orgHandler.handle(action, params) }
+                in ORG_HANDLER_ACTIONS -> scope.launch { orgHandler.handle(action, params) }
 
-                // ── 채널 관리 ──
-                "syncChannel", "getChannelList", "getChannelSummaries",
-                "createChatRoom", "createGroupChatRoom", "openChannel",
-                "addChannelMember", "removeChannelMember",
-                "addChannelFavorite", "removeChannelFavorite", "createConference",
-                "removeChannel", "findChannelByMembers", "getChannel",
-                "deleteRoom", "openChatRoom"
-                    -> scope.launch { channelActionHandler.handle(action, params) }
+                // ── 채널 관리 (joinConference 포함) ──
+                in CHANNEL_HANDLER_ACTIONS -> scope.launch { channelActionHandler.handle(action, params) }
 
                 // ── 채팅 메시지 ──
-                "getChatList", "sendChat", "readChat", "deleteChat", "modChat", "toggleReaction",
-                "addLocalSystemChat",
-                "toggleVote", "closeVote", "pinMessage", "unpinMessage",
-                "getUnreadCount"
-                    -> scope.launch { chatHandler.handle(action, params) }
+                in CHAT_HANDLER_ACTIONS -> scope.launch { chatHandler.handle(action, params) }
                 // destroyChannel·forwardChat 는 nx 에서 apiPost 로 직접 호출 — dispatcher 경유 불필요 (제거됨).
                 "typingChat" -> scope.launch { handleRestForward("typingChat", "/comm/typingchat", params) }
 
                 // ── 쪽지 ──
-                "sendMessage", "readMessage", "deleteMessage", "syncMessage",
-                "fullSync", "loadMoreMessages", "getMessageDetail", "getMessageCounts",
-                "retrieveMessage"
-                    -> scope.launch { messageHandler.handle(action, params) }
+                in MESSAGE_HANDLER_ACTIONS -> scope.launch { messageHandler.handle(action, params) }
 
                 "searchMessageListByUser" -> scope.launch {
                     handleRestForward("searchMessageListByUser", "/comm/syncmessage", params)
                 }
 
                 // ── 파일 (chat / filebox 공통 — context 파라미터로 분기) ──
-                "uploadFile", "pickFile", "downloadFile", "openFile", "relocateFiles",
-                "fileUploadPause", "fileUploadResume", "fileUploadCancel",
-                "fileDownloadPause", "fileDownloadResume", "fileDownloadCancel",
-                "previewFile", "shareFile"
-                    -> scope.launch { fileHandler.handle(action, params) }
+                in FILE_HANDLER_ACTIONS -> scope.launch { fileHandler.handle(action, params) }
 
                 // ── 상태/프로필 ──
                 "changeStatus" -> scope.launch { appHandler.handleChangeStatus(params) }
@@ -224,8 +244,7 @@ class BridgeDispatcher(
                 "uploadProfilePhoto" -> scope.launch { appHandler.handleUploadProfilePhoto(params) }
 
                 // ── 알림 ── (deleteNoti 는 nx 미호출로 제거)
-                "syncNoti", "loadMoreNotis", "getNotiCounts", "readNoti"
-                    -> scope.launch { notiHandler.handle(action, params) }
+                in NOTI_HANDLER_ACTIONS -> scope.launch { notiHandler.handle(action, params) }
 
                 // ── 앱 설정 동기화 ──
                 "syncConfig" -> scope.launch { appHandler.handleSyncConfig(params) }
@@ -245,8 +264,7 @@ class BridgeDispatcher(
                 "getQuicSetting" -> appHandler.handleGetQuicSetting()
                 "setQuicSetting" -> appHandler.handleSetQuicSetting(params)
 
-                // ── 회의 ──
-                "joinConference" -> scope.launch { channelActionHandler.handle(action, params) }
+                // ── 회의 (joinConference 는 CHANNEL_HANDLER_ACTIONS 에서 처리) ──
                 "listConference" -> scope.launch { handleRestForward("listConference", "/comm/listconference", params) }
                 "inviteConference" -> scope.launch { handleRestForward("inviteConference", "/comm/inviteconference", params) }
 
@@ -292,8 +310,7 @@ class BridgeDispatcher(
                 }
 
                 // ── 범용 REST ──
-                "apiPost", "neoSend", "httpRequest"
-                    -> scope.launch { neoSendHandler.handle(action, params) }
+                in NEOSEND_HANDLER_ACTIONS -> scope.launch { neoSendHandler.handle(action, params) }
 
                 // ── 통화 (LiveKit 네이티브 연동) ──
                 "createCall" -> {

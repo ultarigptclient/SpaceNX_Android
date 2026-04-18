@@ -21,6 +21,10 @@ interface ChannelMemberDao {
     @Query("SELECT * FROM channelMembers WHERE channelCode = :channelCode AND (unregistDate IS NULL OR unregistDate = 0)")
     suspend fun getActiveMembersByChannel(channelCode: String): List<ChannelMemberEntity>
 
+    /** 배치 조회: 여러 채널의 active 멤버를 1쿼리로. caller 가 channelCode 별로 group by. */
+    @Query("SELECT * FROM channelMembers WHERE channelCode IN (:channelCodes) AND (unregistDate IS NULL OR unregistDate = 0)")
+    suspend fun getActiveMembersForChannels(channelCodes: List<String>): List<ChannelMemberEntity>
+
     @Query("SELECT * FROM channelMembers WHERE channelCode = :channelCode AND userId = :userId")
     suspend fun getMember(channelCode: String, userId: String): ChannelMemberEntity?
 

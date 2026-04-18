@@ -19,6 +19,7 @@ import net.spacenx.messenger.data.remote.api.AuthApi
 import net.spacenx.messenger.data.remote.api.dto.RefreshTokenRequestDTO
 import net.spacenx.messenger.data.remote.api.dto.SyncConfigRequestDTO
 import net.spacenx.messenger.data.remote.socket.ConnectionConfig
+import net.spacenx.messenger.service.socket.SocketSessionManager
 import org.json.JSONObject
 
 /**

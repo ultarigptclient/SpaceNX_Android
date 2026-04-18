@@ -9,7 +9,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.stateIn
 import net.spacenx.messenger.data.repository.AuthRepository
 import net.spacenx.messenger.data.repository.LoginState
-import net.spacenx.messenger.data.repository.SocketSessionManager
+import net.spacenx.messenger.service.socket.SocketSessionManager
 import javax.inject.Inject
 import javax.inject.Singleton
 

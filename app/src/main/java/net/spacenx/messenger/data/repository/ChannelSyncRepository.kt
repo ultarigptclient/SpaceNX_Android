@@ -3,8 +3,10 @@ package net.spacenx.messenger.data.repository
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import net.spacenx.messenger.common.AppConfig
+import net.spacenx.messenger.data.local.SyncLocks
 import net.spacenx.messenger.common.AppConfig.Companion.EP_COMM_SYNC_CHANNEL
 import net.spacenx.messenger.common.AppConfig.Companion.EP_COMM_SYNC_CHAT
 import net.spacenx.messenger.common.JsonStreamUtil
@@ -19,6 +21,7 @@ import net.spacenx.messenger.data.local.entity.SyncMetaEntity
 import net.spacenx.messenger.data.remote.api.ApiClient
 import net.spacenx.messenger.data.remote.api.dto.SyncChannelRequestDTO
 import net.spacenx.messenger.data.remote.api.dto.SyncChatRequestDTO
+import net.spacenx.messenger.service.socket.SocketSessionManager
 import org.json.JSONObject
 import net.spacenx.messenger.BuildConfig
 import net.spacenx.messenger.util.FileLogger
@@ -236,7 +239,7 @@ class ChannelSyncRepository(
                 }
                 */
 
-                chatDb.runInTransaction {
+                SyncLocks.chatDbMutex.withLock { chatDb.runInTransaction {
                     if (channels.isNotEmpty()) {
                         val existingLastChat = mutableMapOf<String, Triple<Long, String, String>>()
                         val oldChannels = chatDb.channelDao().getAllSync()
@@ -274,7 +277,7 @@ class ChannelSyncRepository(
                     }
                     if (systemChats.isNotEmpty()) { chatDb.chatDao().insertAllSync(systemChats); Log.d(TAG, "syncChannel: ${systemChats.size} system chats upserted") }
                     if (lastEventId > 0) { chatDb.syncMetaDao().insertSync(SyncMetaEntity(SYNC_META_KEY, lastEventId)) }
-                }
+                } }
 
                 Log.d(TAG, "syncChannel complete: lastEventId=$lastEventId")
                 FileLogger.log(TAG, "syncChannel DONE lastEventId=$lastEventId channels=${channels.size} members=${members.size}")
@@ -442,7 +445,7 @@ class ChannelSyncRepository(
                     if (readEventCount > 0) Log.d(TAG, "syncChat: $readEventCount READ events processed")
                 }
 
-                chatDb.runInTransaction {
+                SyncLocks.chatDbMutex.withLock { chatDb.runInTransaction {
                     if (chatEvents.isNotEmpty()) { chatDb.chatEventDao().insertAllSync(chatEvents); Log.d(TAG, "syncChat: ${chatEvents.size} chatEvents saved") }
                     if (chats.isNotEmpty()) { chatDb.chatDao().insertAllSync(chats); Log.d(TAG, "syncChat: ${chats.size} chats saved") }
                     if (readOffsets.isNotEmpty()) { chatDb.channelOffsetDao().insertAllSync(readOffsets); Log.d(TAG, "syncChat: ${readOffsets.size} read offsets saved") }
@@ -475,7 +478,7 @@ class ChannelSyncRepository(
                     if (lastEventId > lastOffset) {
                         chatDb.syncMetaDao().insertSync(SyncMetaEntity(CHAT_SYNC_META_KEY, lastEventId))
                     }
-                }
+                } }
 
                 Log.d(TAG, "syncChat complete: ${chats.size} chats, lastEventId=$lastEventId")
                 FileLogger.log(TAG, "syncChat DONE chats=${chats.size} lastEventId=$lastEventId")

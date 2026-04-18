@@ -2,5 +2,6 @@
 <paths>
     <files-path name="downloads" path="downloads/" />
     <cache-path name="cache" path="." />
-    <external-files-path name="log" path="LOG/" />
+    <!-- FileLogger 내부 저장소 경로 (외부 저장소에서 이전, 보안 강화). -->
+    <files-path name="log" path="LOG/" />
 </paths>

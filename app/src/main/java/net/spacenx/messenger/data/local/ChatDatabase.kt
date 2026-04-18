@@ -26,7 +26,7 @@ import net.spacenx.messenger.data.local.entity.SyncMetaEntity
         ChatEventEntity::class,
         SyncMetaEntity::class
     ],
-    version = 4,
+    version = 5,
     exportSchema = true
 )
 abstract class ChatDatabase : RoomDatabase() {

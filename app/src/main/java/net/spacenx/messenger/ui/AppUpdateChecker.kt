@@ -2,6 +2,7 @@ package net.spacenx.messenger.ui
 
 import android.app.AlertDialog
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.provider.Settings
@@ -18,11 +19,13 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import net.spacenx.messenger.BuildConfig
 import net.spacenx.messenger.R
 import net.spacenx.messenger.data.remote.api.ApiClient
 import net.spacenx.messenger.data.remote.api.dto.UpdateInfo
 import java.io.File
 import java.net.URL
+import java.security.MessageDigest
 
 class AppUpdateChecker(
     private val activity: AppCompatActivity,
@@ -30,6 +33,15 @@ class AppUpdateChecker(
 ) {
     companion object {
         private const val TAG = "AppUpdateChecker"
+
+        /**
+         * 업데이트 APK 다운로드를 허용할 호스트 목록.
+         * 정확 매칭만 허용. 새 호스트 추가 시 코드 변경 + 앱 업데이트 필요.
+         */
+        private val ALLOWED_UPDATE_HOSTS = setOf(
+            "www.ultari.co.kr",
+            "neo.ultari.co.kr"
+        )
     }
 
     private var pendingDownloadUrl: String? = null
@@ -106,6 +118,16 @@ class AppUpdateChecker(
     }
 
     private fun checkPermissionAndDownload(downloadUrl: String) {
+        if (!isUpdateUrlAllowed(downloadUrl)) {
+            Log.e(TAG, "Refusing update from disallowed URL: $downloadUrl")
+            AlertDialog.Builder(activity)
+                .setTitle("업데이트 차단")
+                .setMessage("업데이트 다운로드 주소가 허용 목록에 없어 차단되었습니다.\n관리자에게 문의해주세요.")
+                .setPositiveButton("확인") { _, _ -> activity.finish() }
+                .setCancelable(false)
+                .show()
+            return
+        }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
             !activity.packageManager.canRequestPackageInstalls()
         ) {
@@ -186,6 +208,20 @@ class AppUpdateChecker(
                         }
                     }
                 }
+                if (!verifyApkSignature(apkFile)) {
+                    Log.e(TAG, "APK signature verification failed — refusing to install")
+                    apkFile.delete()
+                    withContext(Dispatchers.Main) {
+                        dialog.dismiss()
+                        AlertDialog.Builder(activity)
+                            .setTitle("업데이트 검증 실패")
+                            .setMessage("다운로드한 업데이트 파일의 서명이 일치하지 않습니다.\n변조 가능성이 있어 설치를 중단합니다.")
+                            .setPositiveButton("확인") { _, _ -> activity.finish() }
+                            .setCancelable(false)
+                            .show()
+                    }
+                    return@launch
+                }
                 withContext(Dispatchers.Main) {
                     dialog.dismiss()
                     installApk(apkFile)
@@ -218,6 +254,73 @@ class AppUpdateChecker(
             activity.startActivity(intent)
         } catch (e: Exception) {
             Log.e(TAG, "Install failed", e)
+        }
+    }
+
+    /**
+     * 서버가 내려준 다운로드 URL 이 HTTPS 이고 호스트 allowlist 안에 들어있는지 확인.
+     * 부분 매칭(*.ultari.co.kr 같은 suffix) 은 의도적으로 허용하지 않음 — 명시 등록만.
+     */
+    private fun isUpdateUrlAllowed(downloadUrl: String): Boolean {
+        return try {
+            val url = URL(downloadUrl)
+            val schemeOk = url.protocol.equals("https", ignoreCase = true)
+            val hostOk = url.host in ALLOWED_UPDATE_HOSTS
+            if (!schemeOk) Log.w(TAG, "Update URL scheme not HTTPS: ${url.protocol}")
+            if (!hostOk) Log.w(TAG, "Update URL host not in allowlist: ${url.host}")
+            schemeOk && hostOk
+        } catch (e: Exception) {
+            Log.e(TAG, "Invalid update URL: $downloadUrl", e)
+            false
+        }
+    }
+
+    /**
+     * 다운로드한 APK 의 서명 인증서 SHA-256 이 BuildConfig.APP_SIGNING_SHA256 과 일치하는지 검증.
+     * 일치하지 않으면 변조된 APK 일 가능성이 높으므로 설치를 중단해야 함.
+     *
+     * 디버그 빌드는 키스토어가 다르므로 건너뜀 (개발 편의).
+     */
+    private fun verifyApkSignature(apkFile: File): Boolean {
+        if (BuildConfig.DEBUG) {
+            Log.d(TAG, "Skipping APK signature check in DEBUG build")
+            return true
+        }
+        return try {
+            val pm = activity.packageManager
+            val expected = BuildConfig.APP_SIGNING_SHA256.uppercase()
+            if (expected.isBlank()) {
+                Log.e(TAG, "APP_SIGNING_SHA256 is empty — refusing to install")
+                return false
+            }
+            val signatures: Array<android.content.pm.Signature> = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                val info = pm.getPackageArchiveInfo(
+                    apkFile.absolutePath,
+                    PackageManager.GET_SIGNING_CERTIFICATES
+                ) ?: return false
+                val signingInfo = info.signingInfo ?: return false
+                if (signingInfo.hasMultipleSigners()) signingInfo.apkContentsSigners
+                else signingInfo.signingCertificateHistory
+            } else {
+                @Suppress("DEPRECATION")
+                val info = pm.getPackageArchiveInfo(
+                    apkFile.absolutePath,
+                    PackageManager.GET_SIGNATURES
+                ) ?: return false
+                @Suppress("DEPRECATION")
+                info.signatures ?: return false
+            }
+            val md = MessageDigest.getInstance("SHA-256")
+            val matched = signatures.any { sig ->
+                val actual = md.digest(sig.toByteArray()).joinToString("") { "%02X".format(it) }
+                Log.d(TAG, "APK signature SHA256 candidate: $actual")
+                actual == expected
+            }
+            if (!matched) Log.e(TAG, "No signature matched expected SHA256: $expected")
+            matched
+        } catch (e: Exception) {
+            Log.e(TAG, "verifyApkSignature failed", e)
+            false
         }
     }
 

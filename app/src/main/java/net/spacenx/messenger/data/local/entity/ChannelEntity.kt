@@ -1,9 +1,14 @@
 package net.spacenx.messenger.data.local.entity
 
 import androidx.room.Entity
+import androidx.room.Index
 import androidx.room.PrimaryKey
 
-@Entity(tableName = "channels")
+@Entity(
+    tableName = "channels",
+    // 채널 목록은 ORDER BY lastChatDate DESC 가 가장 잦은 쿼리. 인덱스 없으면 full scan.
+    indices = [Index("lastChatDate")]
+)
 data class ChannelEntity(
     @PrimaryKey val channelCode: String,
     val channelName: String = "",

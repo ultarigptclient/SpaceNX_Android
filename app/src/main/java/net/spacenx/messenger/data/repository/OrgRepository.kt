@@ -20,8 +20,11 @@ import net.spacenx.messenger.data.remote.api.dto.MyPartRequestDTO
 import net.spacenx.messenger.data.remote.api.dto.SearchUserRequestDTO
 import net.spacenx.messenger.data.remote.api.dto.SubOrgRequestDTO
 import net.spacenx.messenger.data.remote.api.dto.SyncOrgRequestDTO
+import net.spacenx.messenger.service.socket.SocketSessionManager
 import org.json.JSONArray
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import net.spacenx.messenger.data.local.SyncLocks
 import org.json.JSONObject
 
 /**
@@ -172,7 +175,7 @@ class OrgRepository(
 
                 // 단일 트랜잭션으로 DB 일괄 처리
                 val txStart = System.currentTimeMillis()
-                orgDb.runInTransaction {
+                SyncLocks.orgDbMutex.withLock { orgDb.runInTransaction {
                     val deptDao = orgDb.deptDao()
                     val userDao = orgDb.userDao()
 
@@ -206,7 +209,7 @@ class OrgRepository(
                     if (newOrgOffset > 0) {
                         orgDb.syncMetaDao().insertSync(SyncMetaEntity("orgEventOffset", newOrgOffset))
                     }
-                }
+                } }
                 lastSyncHadUserChanges = users.isNotEmpty() || removedUIds.isNotEmpty()
 
                 val txTime = System.currentTimeMillis() - txStart

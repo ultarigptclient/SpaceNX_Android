@@ -1,6 +1,7 @@
-package net.spacenx.messenger.data.repository
+package net.spacenx.messenger.service.socket
 
 import android.content.Context
+import net.spacenx.messenger.data.repository.LoginState
 import android.util.Log
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -23,7 +24,6 @@ import net.spacenx.messenger.data.remote.socket.NeoSocketBase
 import net.spacenx.messenger.data.remote.socket.Transport
 import net.spacenx.messenger.data.remote.socket.codec.BinaryFrameCodec
 import net.spacenx.messenger.data.remote.socket.codec.ProtocolCommand
-import net.spacenx.messenger.data.remote.socket.quic.QuicSocketClient
 import net.spacenx.messenger.data.remote.socket.quic.WebTransportQuicSocket
 import org.json.JSONObject
 import net.spacenx.messenger.util.FileLogger
@@ -39,6 +39,11 @@ class SocketSessionManager(
         private const val TAG = "SocketSessionManager"
         /** HI 응답 대기 한도 — 서버가 FIN 없이 drop 해도 waiters 무한 대기 방지 */
         private const val HI_TIMEOUT_MS = 30_000L
+        /**
+         * 연속 재시도 상한. 도달 시 Disconnected/Failed 상태로 전환하고 재시도 중단.
+         * 5+10+20+40+60*4 ≈ 6분 시도 후 포기. 사용자가 명시적 reconnect 시 다시 시작.
+         */
+        private const val MAX_RECONNECT_ATTEMPTS = 8
     }
 
     // 소켓 — 전송(TCP/QUIC) 무관. ConnectionConfig.transport 로 구체 구현 선택
@@ -60,12 +65,11 @@ class SocketSessionManager(
                 config, l,
                 noopBodyProvider = { buildNoopBody() }
             )
-            Transport.QUIC -> if (WebTransportQuicSocket.isSupported) {
+            Transport.QUIC -> {
+                // minSdk 31 이상에서 WebTransport (Chromium/quiche) 단일 사용.
+                // 기존 kwik 0.10.x fallback 경로는 2026-04-18 제거됨.
                 Log.d(TAG, "QUIC: WebTransport via WebView (Chromium/quiche)")
                 WebTransportQuicSocket(context, config, l, noopBodyProvider = { buildNoopBody() })
-            } else {
-                Log.w(TAG, "QUIC: kwik fallback (API < 31, RETRY may fail)")
-                QuicSocketClient(context, config, l, noopBodyProvider = { buildNoopBody() })
             }
         }
     }
@@ -100,6 +104,37 @@ class SocketSessionManager(
     var hiCompletedDeferred = CompletableDeferred<Unit>()
         private set
 
+    /**
+     * Deferred 의 reset/complete 는 모두 tokenLock 내부에서 실행해 race 방지.
+     * - HI watchdog · NOOP 응답 · refresh 응답이 동시 처리될 때 stale Deferred 가
+     *   다른 객체로 교체된 직후에 complete 되어 waiter 가 영구 대기하는 문제를 차단.
+     */
+    private fun completeJwtTokenDeferred(token: String?) {
+        synchronized(tokenLock) {
+            if (!jwtTokenDeferred.isCompleted) jwtTokenDeferred.complete(token)
+        }
+    }
+    private fun resetJwtTokenDeferred() {
+        synchronized(tokenLock) {
+            jwtTokenDeferred = CompletableDeferred()
+        }
+    }
+    private fun completeHiDeferred() {
+        synchronized(tokenLock) {
+            if (!hiCompletedDeferred.isCompleted) hiCompletedDeferred.complete(Unit)
+        }
+    }
+    private fun completeHiDeferredExceptionally(e: Throwable) {
+        synchronized(tokenLock) {
+            if (!hiCompletedDeferred.isCompleted) hiCompletedDeferred.completeExceptionally(e)
+        }
+    }
+    private fun resetHiDeferred() {
+        synchronized(tokenLock) {
+            hiCompletedDeferred = CompletableDeferred()
+        }
+    }
+
     // 세션 스코프 (소켓 끊김 시 취소 → PubSubRepository의 대기 코루틴 정리)
     var loginSessionScope: CoroutineScope? = null
         private set
@@ -125,6 +160,7 @@ class SocketSessionManager(
     // 재접속 상태
     private val isReconnecting = AtomicBoolean(false)
     @Volatile private var reconnectDelaySec = 5
+    @Volatile private var reconnectAttempts = 0
     private var lastConnectionConfig: ConnectionConfig? = null
 
     // 로그인 시 사용한 자격증명
@@ -148,9 +184,10 @@ class SocketSessionManager(
         jwtToken = null
         refreshToken = null
         restLoginUserJson = null
-        jwtTokenDeferred = CompletableDeferred()
-        hiCompletedDeferred = CompletableDeferred()
+        resetJwtTokenDeferred()
+        resetHiDeferred()
         isReconnecting.set(false)  // 진행 중인 재접속 플래그 초기화 (새 로그인으로 인한 상태 리셋)
+        reconnectAttempts = 0
         loginSessionScope?.cancel()
         loginSessionScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
@@ -173,6 +210,7 @@ class SocketSessionManager(
     fun connect(config: ConnectionConfig) {
         lastConnectionConfig = config
         reconnectDelaySec = 5
+        reconnectAttempts = 0
         binarySocketClient = createSocketClient(config)
         CoroutineScope(Dispatchers.IO).launch {
             binarySocketClient!!.connect()
@@ -182,6 +220,7 @@ class SocketSessionManager(
     suspend fun connectSuspend(config: ConnectionConfig) {
         lastConnectionConfig = config
         reconnectDelaySec = 5
+        reconnectAttempts = 0
         binarySocketClient = createSocketClient(config)
         binarySocketClient!!.connect()
     }
@@ -261,8 +300,8 @@ class SocketSessionManager(
                 if (!newToken.isNullOrEmpty()) {
                     updateTokens(newToken, newRefreshToken)
                 }
-                if (!jwtTokenDeferred.isCompleted) jwtTokenDeferred.complete(jwtToken)
-                if (!hiCompletedDeferred.isCompleted) hiCompletedDeferred.complete(Unit)
+                completeJwtTokenDeferred(jwtToken)
+                completeHiDeferred()
                 Log.i(TAG, "[NeoHS 4/4] HI 성공 ✓ tokenRefreshed=${newToken != null}")
                 FileLogger.log(TAG, "[NeoHS 4/4] HI 성공 ✓ tokenRefreshed=${newToken != null}")
 
@@ -290,8 +329,8 @@ class SocketSessionManager(
                     Log.w(TAG, "HI token rejected, clearing JWT (keeping refreshToken for REST re-auth)")
                     appConfig.clearJwt()
                     jwtToken = null
-                    jwtTokenDeferred = CompletableDeferred()
-                    hiCompletedDeferred = CompletableDeferred()
+                    resetJwtTokenDeferred()
+                    resetHiDeferred()
                     loginSessionScope?.cancel()
                     loginSessionScope = null
                     binarySocketClient?.disconnectSilently()
@@ -301,9 +340,7 @@ class SocketSessionManager(
                 } else {
                     // 토큰 무관 HI 실패 (서버 오류 등) → deferred 즉시 실패 처리 + UI 알림
                     // hiCompletedDeferred.await() 대기 중인 코루틴이 무한 대기하지 않도록 exception으로 완료
-                    if (!hiCompletedDeferred.isCompleted) {
-                        hiCompletedDeferred.completeExceptionally(Exception("HI failed: $msg"))
-                    }
+                    completeHiDeferredExceptionally(Exception("HI failed: $msg"))
                     _loginState.tryEmit(LoginState.Failed("서버 오류: $msg"))
                 }
             }
@@ -401,6 +438,15 @@ class SocketSessionManager(
         if (!isReconnecting.compareAndSet(false, true)) return  // 이미 재접속 중이면 중복 진입 차단
         if (lastConnectionConfig == null) { isReconnecting.set(false); return }
         val scope = loginSessionScope ?: run { isReconnecting.set(false); return }  // 로그아웃/세션 종료 시 재접속 시도 안 함
+        // Circuit breaker: 연속 N회 실패하면 재시도 중단. 사용자가 명시적 reconnect 호출 시 재개.
+        if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+            Log.w(TAG, "scheduleReconnect: max attempts ($MAX_RECONNECT_ATTEMPTS) reached, giving up")
+            FileLogger.log(TAG, "Reconnect GIVE_UP after $reconnectAttempts attempts")
+            isReconnecting.set(false)
+            _loginState.tryEmit(LoginState.Failed("서버에 연결할 수 없습니다 ($MAX_RECONNECT_ATTEMPTS 회 시도 실패)"))
+            return
+        }
+        reconnectAttempts++
         val delaySec = reconnectDelaySec
         // Jitter — 서버 재시작 시 thundering herd 방지 (0~2000ms 랜덤 추가)
         val jitterMs = (0..2000).random()
@@ -493,11 +539,12 @@ class SocketSessionManager(
                             if (newToken.isNotEmpty()) {
                                 updateTokens(newToken, newRefresh)
                             }
-                            if (!jwtTokenDeferred.isCompleted) jwtTokenDeferred.complete(jwtToken)
-                            if (!hiCompletedDeferred.isCompleted) hiCompletedDeferred.complete(Unit)
+                            completeJwtTokenDeferred(jwtToken)
+                            completeHiDeferred()
 
                             isReconnecting.set(false)
                             reconnectDelaySec = 5
+                            reconnectAttempts = 0  // HI 성공 → 재시도 카운터 리셋
                             Log.d(TAG, "Reconnect HI OK → triggering delta sync")
                             hiCompletedListeners.forEach { it() }
                             onReconnected?.invoke()

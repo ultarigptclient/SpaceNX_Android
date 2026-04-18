@@ -3,6 +3,7 @@ package net.spacenx.messenger.data.repository
 import net.spacenx.messenger.common.AppConfig
 import net.spacenx.messenger.data.local.ChatDatabase
 import net.spacenx.messenger.data.local.DatabaseProvider
+import net.spacenx.messenger.service.socket.SocketSessionManager
 import org.json.JSONObject
 
 /**

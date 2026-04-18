@@ -19,7 +19,7 @@ import net.spacenx.messenger.data.repository.NotiRepository
 import net.spacenx.messenger.data.repository.OrgRepository
 import net.spacenx.messenger.data.repository.ProjectRepository
 import net.spacenx.messenger.data.repository.PubSubRepository
-import net.spacenx.messenger.data.repository.UserNameCache
+import net.spacenx.messenger.data.cache.UserNameCache
 import org.json.JSONArray
 import org.json.JSONObject
 import javax.inject.Inject

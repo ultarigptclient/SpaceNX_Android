@@ -366,90 +366,7 @@ class MainActivity : AppCompatActivity() {
             startActivity(Intent(this@MainActivity, ConfigLogFileActivity::class.java))
         }
 
-        // WebView + 서브 WebView + 인앱 배너 초기화
-        webView = findViewById(R.id.webView)
-        subWebView = findViewById(R.id.subWebView)
-        inAppBanner = findViewById(R.id.inAppBanner)
-        initSubWebView()
-        webView.settings.apply {
-            javaScriptEnabled = true
-            domStorageEnabled = true
-            allowFileAccess = false
-            allowContentAccess = false
-            cacheMode = android.webkit.WebSettings.LOAD_CACHE_ELSE_NETWORK
-        }
-
-        webView.webViewClient = object : WebViewClient() {
-            override fun onReceivedSslError(
-                view: WebView?,
-                handler: android.webkit.SslErrorHandler?,
-                error: android.net.http.SslError?
-            ) {
-                Log.w(TAG, "SSL error: ${error?.primaryError}, url: ${error?.url}")
-                handler?.proceed()
-            }
-
-            override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
-                super.onPageStarted(view, url, favicon)
-                Log.d(TAG, "Page started: $url")
-            }
-
-            override fun onPageFinished(view: WebView?, url: String?) {
-                super.onPageFinished(view, url)
-                Log.d(TAG, "Page loaded: $url")
-                statusBarManager.updateStatusBarColor(view)
-                statusBarManager.injectColorSchemeListener(view)
-                // openUserDetail 동시 호출 resolver 큐 shim 주입
-                view?.evaluateJavascript(BRIDGE_SHIM_JS, null)
-
-                // 선제적 autoLogin: WebView 로드 전에 Authenticated 완료된 경우
-                // React가 waitAutoLogin 콜백을 등록할 때까지 짧은 지연 후 resolve
-                val pending = pendingAuthJson
-                if (pending != null && isAutoLogin) {
-                    Log.d(TAG, "Page loaded: pendingAuthJson found, will resolve after React init")
-                    view?.postDelayed({
-                        // Activity destroy 후 dead WebView 에 evaluateJavascript 호출 방지
-                        if (isDestroyed || isFinishing) return@postDelayed
-                        val stillPending = pendingAuthJson
-                        if (stillPending != null) {
-                            pendingAuthJson = null
-                            Log.d(TAG, "→ _autoLoginResolve (deferred after page load)")
-                            webView.evaluateJavascript(
-                                "(function(){var fn=window._waitAutoLoginResolve||window._autoLoginResolve;if(fn)fn('$stillPending');})();",
-                                null
-                            )
-                        }
-                    }, 100) // React가 getClientState → waitAutoLogin 콜백 등록하는 시간
-                }
-            }
-        }
-
-        webView.webChromeClient = object : WebChromeClient() {
-            override fun onConsoleMessage(consoleMessage: android.webkit.ConsoleMessage?): Boolean {
-                consoleMessage?.let {
-                    Log.d("WebConsole", "[${it.messageLevel()}] ${it.message()} (${it.sourceId()}:${it.lineNumber()})")
-                }
-                return true
-            }
-
-            override fun onShowFileChooser(
-                webView: WebView?,
-                filePathCallback: android.webkit.ValueCallback<Array<android.net.Uri>>?,
-                fileChooserParams: FileChooserParams?
-            ): Boolean {
-                Log.d("FileChooser", "onShowFileChooser: acceptTypes=${fileChooserParams?.acceptTypes?.joinToString()}, mode=${fileChooserParams?.mode}")
-                fileUploadCallback?.onReceiveValue(null)
-                fileUploadCallback = filePathCallback
-                val intent = fileChooserParams?.createIntent() ?: android.content.Intent(android.content.Intent.ACTION_GET_CONTENT).apply {
-                    addCategory(android.content.Intent.CATEGORY_OPENABLE)
-                    type = "*/*"
-                    putExtra(android.content.Intent.EXTRA_ALLOW_MULTIPLE, true)
-                }
-                Log.d("FileChooser", "Launching file chooser intent: ${intent.type}")
-                fileChooserLauncher.launch(intent)
-                return true
-            }
-        }
+        setupMainWebView()
 
         // BridgeDispatcher + JavaScript Bridge 등록
         bridgeDispatcher = BridgeDispatcher(
@@ -503,58 +420,9 @@ class MainActivity : AppCompatActivity() {
             setClearAuthOnNextLoad = { v -> clearAuthOnNextLoad = v }
         )
 
-        // addDocumentStartJavaScript: 모든 페이지 스크립트보다 먼저 실행 보장
-        // clearAuthOnNextLoad 플래그가 true이면 localStorage isLoggedIn 제거 (로그인 화면 강제 표시)
-        webView.addJavascriptInterface(object {
-            @android.webkit.JavascriptInterface
-            fun shouldClearAuth(): Boolean {
-                val result = clearAuthOnNextLoad
-                if (result) clearAuthOnNextLoad = false
-                return result
-            }
-        }, "_AuthBridge")
-        if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
-            WebViewCompat.addDocumentStartJavaScript(
-                webView,
-                "(function(){try{var has=typeof window._AuthBridge!=='undefined';var should=has&&window._AuthBridge.shouldClearAuth();console.log('[_Auth] bridge='+has+' shouldClear='+should+' nx_auth='+localStorage.getItem('nx_auth'));if(should){localStorage.removeItem('nx_auth');localStorage.removeItem('isLoggedIn');localStorage.removeItem('currentUser');console.log('[_Auth] cleared');}}catch(e){console.log('[_Auth] error: '+e);}})();",
-                setOf("*")
-            )
-        }
+        setupAuthBridge()
 
-        // 뒤로가기 처리
-        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
-            override fun handleOnBackPressed() {
-                // 서브 WebView가 열려있으면 닫기
-                if (subWebView.visibility == android.view.View.VISIBLE) {
-                    closeSubWebView()
-                    backPressedTime = 0L
-                    return
-                }
-
-                // React에 backPressed 전달
-                // webView.goBack()/history.back() 사용 안함: SPA에서 URL 히스토리 되돌리면 테마/상태가 원복되는 문제
-                // React가 window._onBackPressed()를 정의: true=SPA 내부에서 처리됨, false=루트 화면
-                // 미정의 시 기존 동작 (항상 종료 토스트)
-                webView.evaluateJavascript(
-                    "(function() { if (typeof window._onBackPressed === 'function') return window._onBackPressed(); return false; })()"
-                ) { result ->
-                    runOnUiThread {
-                        if (result == "true") {
-                            backPressedTime = 0L
-                        } else {
-                            bridgeDispatcher.notifyReactOnce("backPressed")
-                            val now = System.currentTimeMillis()
-                            if (now - backPressedTime < 1500L) {
-                                finish()
-                            } else {
-                                backPressedTime = now
-                                Toast.makeText(this@MainActivity, "한번 더 누르면 종료됩니다", Toast.LENGTH_SHORT).show()
-                            }
-                        }
-                    }
-                }
-            }
-        })
+        setupBackPressed()
 
         // 로그인 상태 관찰
         lifecycleScope.launch {
@@ -563,75 +431,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        // Subscribe(Presence) 응답 관찰
-        lifecycleScope.launch {
-            repeatOnLifecycle(Lifecycle.State.STARTED) {
-                loginViewModel.subscribeResponse.collect { jsonStr ->
-                    // icon(PC) / mobileIcon 병합 → 최종 icon (React BuddyPage 렌더용)
-                    // 본인 userId이면 로컬 저장 상태로 덮어씀 (서버가 0으로 내려줘도 유지)
-                    val myUserId = appConfig.getSavedUserId() ?: ""
-                    val myStatusCode = appConfig.getMyStatusCode()
-                    val myNick = appConfig.getMyNick()
-                    val transformed = try {
-                        val json = org.json.JSONObject(jsonStr)
-                        val users = json.optJSONArray("users")
-                        if (users != null) {
-                            for (i in 0 until users.length()) {
-                                val u = users.getJSONObject(i)
-                                val mobileIcon = u.optInt("mobileIcon", 0)
-                                val pcIcon = u.optInt("icon", 0)
-                                val isMe = u.optString("userId") == myUserId
-                                // mobileIcon = 모바일 기기 연결 여부 플래그 (1=접속중, 0=미접속) — 상태 코드가 아님
-                                // icon      = 사용자가 명시적으로 설정한 상태 (자리비움=2, 다른용무중=3 등)
-                                // 본인: 서버 icon(명시적 상태) 우선 → 서버가 0이면 로컬 저장값으로 복원
-                                // 타인: mobileIcon(모바일 접속중) > 0 이면 mobileIcon, 아니면 pcIcon
-                                val icon = if (isMe) {
-                                    when {
-                                        pcIcon > 0 -> pcIcon
-                                        myStatusCode > 0 -> myStatusCode
-                                        else -> 0
-                                    }
-                                } else {
-                                    if (mobileIcon > 0) mobileIcon else pcIcon
-                                }
-                                u.put("icon", icon)
-                                if (isMe) {
-                                    val serverNick = u.optString("nick")
-                                    if (serverNick.isNotEmpty()) {
-                                        // 서버 nick이 있으면 로컬 캐시 갱신 (다른 기기에서 변경된 경우 반영)
-                                        if (serverNick != myNick) appConfig.saveMyNick(serverNick)
-                                    } else if (myNick.isNotEmpty()) {
-                                        // 서버가 빈값으로 내려줘도 로컬 저장값으로 복원
-                                        u.put("nick", myNick)
-                                    }
-                                }
-                            }
-                        }
-                        json.toString()
-                    } catch (_: Exception) { jsonStr }
-                    Log.d("Presence", "[4] subscribe→React: $transformed")
-                    webView.post {
-                        webView.evaluateJavascript(
-                            "window._onPresenceUpdate($transformed)",
-                            null
-                        )
-                    }
-                    // _autoLoginResolve 이후 타이밍 보장: subscribe 응답 후 저장된 내 사진 버전 주입
-                    val myPhotoVersion = appConfig.getMyPhotoVersion()
-                    if (myPhotoVersion > 0 && myUserId.isNotEmpty()) {
-                        val photoUrl = "/photo/$myUserId?v=$myPhotoVersion"
-                        val photoJson = """{"users":[{"userId":"$myUserId","command":"Photo","photoUrl":"$photoUrl","photoVersion":$myPhotoVersion}]}"""
-                        Log.d("Presence", "[restore] photo after subscribe: $photoJson")
-                        webView.post {
-                            webView.evaluateJavascript(
-                                "window._onPresenceUpdate && window._onPresenceUpdate('${net.spacenx.messenger.common.JsEscapeUtil.escapeForJs(photoJson)}')",
-                                null
-                            )
-                        }
-                    }
-                }
-            }
-        }
+        observeSubscribeResponse()
 
 
         // orgList/buddyList는 startBackgroundSync의 orgReady/buddyReady 이벤트 →
@@ -1340,6 +1140,225 @@ class MainActivity : AppCompatActivity() {
             }
             callOverlayFragment = null
             Log.d(TAG, "hideCallOverlay")
+        }
+    }
+
+    // ── onCreate 분해 헬퍼: 메인 WebView 초기화 (settings + WebViewClient + WebChromeClient) ──
+    @SuppressLint("SetJavaScriptEnabled")
+    private fun setupMainWebView() {
+        // WebView + 서브 WebView + 인앱 배너 초기화
+        webView = findViewById(R.id.webView)
+        subWebView = findViewById(R.id.subWebView)
+        inAppBanner = findViewById(R.id.inAppBanner)
+        initSubWebView()
+        webView.settings.apply {
+            javaScriptEnabled = true
+            domStorageEnabled = true
+            allowFileAccess = false
+            allowContentAccess = false
+            cacheMode = android.webkit.WebSettings.LOAD_CACHE_ELSE_NETWORK
+        }
+
+        webView.webViewClient = object : WebViewClient() {
+            override fun onReceivedSslError(
+                view: WebView?,
+                handler: android.webkit.SslErrorHandler?,
+                error: android.net.http.SslError?
+            ) {
+                Log.w(TAG, "SSL error: ${error?.primaryError}, url: ${error?.url}")
+                handler?.proceed()
+            }
+
+            override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
+                super.onPageStarted(view, url, favicon)
+                Log.d(TAG, "Page started: $url")
+            }
+
+            override fun onPageFinished(view: WebView?, url: String?) {
+                super.onPageFinished(view, url)
+                Log.d(TAG, "Page loaded: $url")
+                statusBarManager.updateStatusBarColor(view)
+                statusBarManager.injectColorSchemeListener(view)
+                // openUserDetail 동시 호출 resolver 큐 shim 주입
+                view?.evaluateJavascript(BRIDGE_SHIM_JS, null)
+
+                // 선제적 autoLogin: WebView 로드 전에 Authenticated 완료된 경우
+                // React가 waitAutoLogin 콜백을 등록할 때까지 짧은 지연 후 resolve
+                val pending = pendingAuthJson
+                if (pending != null && isAutoLogin) {
+                    Log.d(TAG, "Page loaded: pendingAuthJson found, will resolve after React init")
+                    view?.postDelayed({
+                        // Activity destroy 후 dead WebView 에 evaluateJavascript 호출 방지
+                        if (isDestroyed || isFinishing) return@postDelayed
+                        val stillPending = pendingAuthJson
+                        if (stillPending != null) {
+                            pendingAuthJson = null
+                            Log.d(TAG, "→ _autoLoginResolve (deferred after page load)")
+                            webView.evaluateJavascript(
+                                "(function(){var fn=window._waitAutoLoginResolve||window._autoLoginResolve;if(fn)fn('$stillPending');})();",
+                                null
+                            )
+                        }
+                    }, 100) // React가 getClientState → waitAutoLogin 콜백 등록하는 시간
+                }
+            }
+        }
+
+        webView.webChromeClient = object : WebChromeClient() {
+            override fun onConsoleMessage(consoleMessage: android.webkit.ConsoleMessage?): Boolean {
+                consoleMessage?.let {
+                    Log.d("WebConsole", "[${it.messageLevel()}] ${it.message()} (${it.sourceId()}:${it.lineNumber()})")
+                }
+                return true
+            }
+
+            override fun onShowFileChooser(
+                webView: WebView?,
+                filePathCallback: android.webkit.ValueCallback<Array<android.net.Uri>>?,
+                fileChooserParams: FileChooserParams?
+            ): Boolean {
+                Log.d("FileChooser", "onShowFileChooser: acceptTypes=${fileChooserParams?.acceptTypes?.joinToString()}, mode=${fileChooserParams?.mode}")
+                fileUploadCallback?.onReceiveValue(null)
+                fileUploadCallback = filePathCallback
+                val intent = fileChooserParams?.createIntent() ?: android.content.Intent(android.content.Intent.ACTION_GET_CONTENT).apply {
+                    addCategory(android.content.Intent.CATEGORY_OPENABLE)
+                    type = "*/*"
+                    putExtra(android.content.Intent.EXTRA_ALLOW_MULTIPLE, true)
+                }
+                Log.d("FileChooser", "Launching file chooser intent: ${intent.type}")
+                fileChooserLauncher.launch(intent)
+                return true
+            }
+        }
+    }
+
+    // ── onCreate 분해 헬퍼: AuthBridge + DocumentStart script ──
+    private fun setupAuthBridge() {
+        // addDocumentStartJavaScript: 모든 페이지 스크립트보다 먼저 실행 보장
+        // clearAuthOnNextLoad 플래그가 true이면 localStorage isLoggedIn 제거 (로그인 화면 강제 표시)
+        webView.addJavascriptInterface(object {
+            @android.webkit.JavascriptInterface
+            fun shouldClearAuth(): Boolean {
+                val result = clearAuthOnNextLoad
+                if (result) clearAuthOnNextLoad = false
+                return result
+            }
+        }, "_AuthBridge")
+        if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
+            WebViewCompat.addDocumentStartJavaScript(
+                webView,
+                "(function(){try{var has=typeof window._AuthBridge!=='undefined';var should=has&&window._AuthBridge.shouldClearAuth();console.log('[_Auth] bridge='+has+' shouldClear='+should+' nx_auth='+localStorage.getItem('nx_auth'));if(should){localStorage.removeItem('nx_auth');localStorage.removeItem('isLoggedIn');localStorage.removeItem('currentUser');console.log('[_Auth] cleared');}}catch(e){console.log('[_Auth] error: '+e);}})();",
+                setOf("*")
+            )
+        }
+    }
+
+    // ── onCreate 분해 헬퍼: 뒤로가기 처리 ──
+    private fun setupBackPressed() {
+        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() {
+                // 서브 WebView가 열려있으면 닫기
+                if (subWebView.visibility == android.view.View.VISIBLE) {
+                    closeSubWebView()
+                    backPressedTime = 0L
+                    return
+                }
+
+                // React에 backPressed 전달
+                // webView.goBack()/history.back() 사용 안함: SPA에서 URL 히스토리 되돌리면 테마/상태가 원복되는 문제
+                // React가 window._onBackPressed()를 정의: true=SPA 내부에서 처리됨, false=루트 화면
+                // 미정의 시 기존 동작 (항상 종료 토스트)
+                webView.evaluateJavascript(
+                    "(function() { if (typeof window._onBackPressed === 'function') return window._onBackPressed(); return false; })()"
+                ) { result ->
+                    runOnUiThread {
+                        if (result == "true") {
+                            backPressedTime = 0L
+                        } else {
+                            bridgeDispatcher.notifyReactOnce("backPressed")
+                            val now = System.currentTimeMillis()
+                            if (now - backPressedTime < 1500L) {
+                                finish()
+                            } else {
+                                backPressedTime = now
+                                Toast.makeText(this@MainActivity, "한번 더 누르면 종료됩니다", Toast.LENGTH_SHORT).show()
+                            }
+                        }
+                    }
+                }
+            }
+        })
+    }
+
+    // ── onCreate 분해 헬퍼: Subscribe(Presence) 응답 관찰 ──
+    private fun observeSubscribeResponse() {
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                loginViewModel.subscribeResponse.collect { jsonStr ->
+                    // icon(PC) / mobileIcon 병합 → 최종 icon (React BuddyPage 렌더용)
+                    // 본인 userId이면 로컬 저장 상태로 덮어씀 (서버가 0으로 내려줘도 유지)
+                    val myUserId = appConfig.getSavedUserId() ?: ""
+                    val myStatusCode = appConfig.getMyStatusCode()
+                    val myNick = appConfig.getMyNick()
+                    val transformed = try {
+                        val json = org.json.JSONObject(jsonStr)
+                        val users = json.optJSONArray("users")
+                        if (users != null) {
+                            for (i in 0 until users.length()) {
+                                val u = users.getJSONObject(i)
+                                val mobileIcon = u.optInt("mobileIcon", 0)
+                                val pcIcon = u.optInt("icon", 0)
+                                val isMe = u.optString("userId") == myUserId
+                                // mobileIcon = 모바일 기기 연결 여부 플래그 (1=접속중, 0=미접속) — 상태 코드가 아님
+                                // icon      = 사용자가 명시적으로 설정한 상태 (자리비움=2, 다른용무중=3 등)
+                                // 본인: 서버 icon(명시적 상태) 우선 → 서버가 0이면 로컬 저장값으로 복원
+                                // 타인: mobileIcon(모바일 접속중) > 0 이면 mobileIcon, 아니면 pcIcon
+                                val icon = if (isMe) {
+                                    when {
+                                        pcIcon > 0 -> pcIcon
+                                        myStatusCode > 0 -> myStatusCode
+                                        else -> 0
+                                    }
+                                } else {
+                                    if (mobileIcon > 0) mobileIcon else pcIcon
+                                }
+                                u.put("icon", icon)
+                                if (isMe) {
+                                    val serverNick = u.optString("nick")
+                                    if (serverNick.isNotEmpty()) {
+                                        // 서버 nick이 있으면 로컬 캐시 갱신 (다른 기기에서 변경된 경우 반영)
+                                        if (serverNick != myNick) appConfig.saveMyNick(serverNick)
+                                    } else if (myNick.isNotEmpty()) {
+                                        // 서버가 빈값으로 내려줘도 로컬 저장값으로 복원
+                                        u.put("nick", myNick)
+                                    }
+                                }
+                            }
+                        }
+                        json.toString()
+                    } catch (_: Exception) { jsonStr }
+                    Log.d("Presence", "[4] subscribe→React: $transformed")
+                    webView.post {
+                        webView.evaluateJavascript(
+                            "window._onPresenceUpdate($transformed)",
+                            null
+                        )
+                    }
+                    // _autoLoginResolve 이후 타이밍 보장: subscribe 응답 후 저장된 내 사진 버전 주입
+                    val myPhotoVersion = appConfig.getMyPhotoVersion()
+                    if (myPhotoVersion > 0 && myUserId.isNotEmpty()) {
+                        val photoUrl = "/photo/$myUserId?v=$myPhotoVersion"
+                        val photoJson = """{"users":[{"userId":"$myUserId","command":"Photo","photoUrl":"$photoUrl","photoVersion":$myPhotoVersion}]}"""
+                        Log.d("Presence", "[restore] photo after subscribe: $photoJson")
+                        webView.post {
+                            webView.evaluateJavascript(
+                                "window._onPresenceUpdate && window._onPresenceUpdate('${net.spacenx.messenger.common.JsEscapeUtil.escapeForJs(photoJson)}')",
+                                null
+                            )
+                        }
+                    }
+                }
+            }
         }
     }
 }

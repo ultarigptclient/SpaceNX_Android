@@ -14,9 +14,9 @@ import net.spacenx.messenger.data.repository.NotiRepository
 import net.spacenx.messenger.data.repository.OrgRepository
 import net.spacenx.messenger.data.repository.ProjectRepository
 import net.spacenx.messenger.data.repository.PubSubRepository
-import net.spacenx.messenger.data.repository.SocketSessionManager
 import net.spacenx.messenger.data.repository.StatusRepository
-import net.spacenx.messenger.data.repository.UserNameCache
+import net.spacenx.messenger.data.cache.UserNameCache
+import net.spacenx.messenger.service.socket.SocketSessionManager
 import javax.inject.Singleton
 
 @Module

@@ -13,6 +13,7 @@ import net.spacenx.messenger.data.local.DatabaseProvider
 import net.spacenx.messenger.data.local.entity.*
 import java.util.Calendar as JavaCalendar
 import net.spacenx.messenger.data.remote.api.ApiClient
+import net.spacenx.messenger.service.socket.SocketSessionManager
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray

@@ -6,6 +6,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import net.spacenx.messenger.common.AppConfig
 import net.spacenx.messenger.data.remote.api.ApiClient
+import net.spacenx.messenger.service.socket.SocketSessionManager
 import org.json.JSONObject
 
 class StatusRepository(

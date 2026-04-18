@@ -7,7 +7,7 @@ import dagger.hilt.InstallIn
 import dagger.hilt.android.qualifiers.ApplicationContext
 import dagger.hilt.components.SingletonComponent
 import net.spacenx.messenger.common.AppConfig
-import net.spacenx.messenger.data.repository.SocketSessionManager
+import net.spacenx.messenger.service.socket.SocketSessionManager
 import javax.inject.Singleton
 
 @Module

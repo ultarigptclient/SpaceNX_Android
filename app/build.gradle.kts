@@ -21,13 +21,24 @@ android {
 
     defaultConfig {
         applicationId = "net.spacenx.messenger"
-        minSdk = 29
+        // 2026-04-18: minSdk 29 → 31. Android 11 이하 (API 30) 단말 지원 중단.
+        // QUIC: kwik 0.10.x (API 30 미만 fallback) 제거하고 WebTransport (Chromium/quiche, API 31+) 단일화.
+        minSdk = 31
         targetSdk = 35
         versionCode = appVersionCode
         versionName = appVersionName
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         testInstrumentationRunnerArguments["clearPackageData"] = "false"
+
+        // 업데이트 APK 서명 검증용 — release 키스토어의 SHA-256 (대문자, 콜론 제거)
+        // 추출: keytool -list -v -keystore <ks> -alias <alias> | grep SHA256
+        // 키스토어 교체 시 반드시 갱신할 것.
+        buildConfigField(
+            "String",
+            "APP_SIGNING_SHA256",
+            "\"3DC65C75080DD9859DB80FD2439F3EF3A5E4DC335CC5DCD12C7D5EA3E7F6EF19\""
+        )
     }
 
     signingConfigs {
@@ -157,7 +168,8 @@ dependencies {
     implementation("androidx.security:security-crypto:1.1.0-alpha06") //2026-03-13 EncryptedSharedPreferences
     //2026-04-18 livekit 당장 미사용으로 의존성 제거함. 추후 주석 풀어야함
     //implementation("io.livekit:livekit-android:2.5.0") // LiveKit 통화
-    implementation(libs.kwik) // QUIC raw bidi stream (Gateway2:18029, ALPN "neo")
+    // 2026-04-18 kwik QUIC 의존성 제거. minSdk 31 로 올리고 WebTransport (Chromium/quiche) 단일 경로로 일원화.
+    // implementation(libs.kwik) // QUIC raw bidi stream (Gateway2:18029, ALPN "neo")
     implementation(libs.hilt.android)
     kapt(libs.hilt.compiler)
     testImplementation(libs.junit)
