@@ -20,6 +20,8 @@ import net.spacenx.messenger.data.remote.api.ApiClient
 import net.spacenx.messenger.data.remote.api.dto.SyncChannelRequestDTO
 import net.spacenx.messenger.data.remote.api.dto.SyncChatRequestDTO
 import org.json.JSONObject
+import net.spacenx.messenger.BuildConfig
+import net.spacenx.messenger.util.FileLogger
 
 /**
  * 채널·채팅 동기화 (REST → DB)
@@ -56,6 +58,7 @@ class ChannelSyncRepository(
                 val lastOffset = chatDb.syncMetaDao().getValueSync(SYNC_META_KEY) ?: 0L
 
                 Log.d(TAG, "syncChannel: userId=$userId, lastOffset=$lastOffset")
+                FileLogger.log(TAG, "syncChannel REQ userId=$userId offset=$lastOffset")
 
                 val channelApi = ApiClient.createChannelApiFromBaseUrl(appConfig.getRestBaseUrl(), token)
                 val endpoint = appConfig.getEndpoint(EP_COMM_SYNC_CHANNEL, "api/comm/syncchannel")
@@ -88,6 +91,7 @@ class ChannelSyncRepository(
                     reader.endObject()
                 }
                 Log.d(TAG, "syncChannel page: events=${eventsArray.size}, lastEventId=$lastEventId, errorCode=$errorCode")
+                FileLogger.log(TAG, "syncChannel RES events=${eventsArray.size} lastEventId=$lastEventId errorCode=$errorCode")
 
                 if (errorCode != 0) return@withContext false
 
@@ -115,6 +119,7 @@ class ChannelSyncRepository(
                         val ch = event.optJSONObject("channel") ?: JSONObject()
                         val channelCode = ch.optString("channelCode", "")
                         val eventMembers = event.optJSONArray("channelMembers")
+                        if (BuildConfig.DEBUG) Log.d(TAG, "syncChannel event: type=$eventType, channel=$channelCode, raw=${event.toString().take(200)}")
 
                         when (eventType) {
                             "MAKE_CHANNEL", "ADD_MEMBER", "MOD_CHANNEL", "SET_CHANNEL" -> {
@@ -131,6 +136,7 @@ class ChannelSyncRepository(
                                         channelName = ch.optString("channelName", ""),
                                         channelType = ch.optString("channelType", ""),
                                         state = channelState,
+                                        lastChatDate = eventDate,
                                         additional = ch.optString("additional", "")
                                     ))
                                 }
@@ -190,6 +196,9 @@ class ChannelSyncRepository(
                 }
 
                 val systemChats = mutableListOf<ChatEntity>()
+                // 2026-04-18: 서버가 syncChat ADD 이벤트로 chatType="SYSTEM" 입장/퇴장 메시지를 별도 내려주므로
+                //             sync 경로에서도 자체 생성 비활성화 (중복 방지). 서버 경로 이상 시 복구 위해 주석 보존.
+                /*
                 if (addGroups.isNotEmpty() || removeEntries.isNotEmpty()) {
                     try {
                         val orgDb = databaseProvider.getOrgDatabase()
@@ -225,9 +234,10 @@ class ChannelSyncRepository(
                         }
                     } catch (_: Exception) { /* org DB 미준비 시 무시 */ }
                 }
+                */
 
                 chatDb.runInTransaction {
-                    if (lastOffset == 0L && channels.isNotEmpty()) {
+                    if (channels.isNotEmpty()) {
                         val existingLastChat = mutableMapOf<String, Triple<Long, String, String>>()
                         val oldChannels = chatDb.channelDao().getAllSync()
                         for (old in oldChannels) {
@@ -235,8 +245,10 @@ class ChannelSyncRepository(
                                 existingLastChat[old.channelCode] = Triple(old.lastChatDate, old.lastChatContents, old.lastSendUserId)
                             }
                         }
-                        chatDb.channelDao().deleteAllSync()
-                        chatDb.channelMemberDao().deleteAllSync()
+                        if (lastOffset == 0L) {
+                            chatDb.channelDao().deleteAllSync()
+                            chatDb.channelMemberDao().deleteAllSync()
+                        }
                         for (i in channels.indices) {
                             val saved = existingLastChat[channels[i].channelCode]
                             if (saved != null) {
@@ -249,25 +261,27 @@ class ChannelSyncRepository(
                     if (offsets.isNotEmpty()) { chatDb.channelOffsetDao().insertAllSync(offsets); Log.d(TAG, "syncChannel: ${offsets.size} offsets saved") }
                     for ((rmChannelCode, rmUserId) in removedMemberPairs) {
                         chatDb.channelMemberDao().deleteMemberSync(rmChannelCode, rmUserId)
-                        Log.d(TAG, "syncChannel: member hard-deleted channelCode=$rmChannelCode userId=$rmUserId")
+                        if (BuildConfig.DEBUG) Log.d(TAG, "syncChannel: member hard-deleted channelCode=$rmChannelCode userId=$rmUserId")
                     }
                     for (code in destroyedChannelCodes) {
                         chatDb.channelDao().deleteByChannelCodeSync(code)
                         chatDb.channelMemberDao().deleteByChannelCodeSync(code)
-                        Log.d(TAG, "syncChannel: destroyed channel=$code")
+                        if (BuildConfig.DEBUG) Log.d(TAG, "syncChannel: destroyed channel=$code")
                     }
                     for (code in removedChannelCodes) {
                         chatDb.channelMemberDao().unregistMemberSync(code, myUserId, System.currentTimeMillis())
-                        Log.d(TAG, "syncChannel: removed channel=$code (unregist)")
+                        if (BuildConfig.DEBUG) Log.d(TAG, "syncChannel: removed channel=$code (unregist)")
                     }
                     if (systemChats.isNotEmpty()) { chatDb.chatDao().insertAllSync(systemChats); Log.d(TAG, "syncChannel: ${systemChats.size} system chats upserted") }
                     if (lastEventId > 0) { chatDb.syncMetaDao().insertSync(SyncMetaEntity(SYNC_META_KEY, lastEventId)) }
                 }
 
                 Log.d(TAG, "syncChannel complete: lastEventId=$lastEventId")
+                FileLogger.log(TAG, "syncChannel DONE lastEventId=$lastEventId channels=${channels.size} members=${members.size}")
                 true
             } catch (e: Exception) {
                 Log.e(TAG, "syncChannel error: ${e.message}", e)
+                FileLogger.log(TAG, "syncChannel ERROR ${e.message}")
                 false
             }
         }
@@ -284,6 +298,7 @@ class ChannelSyncRepository(
                 val lastOffset = chatDb.syncMetaDao().getValueSync(CHAT_SYNC_META_KEY) ?: 0L
 
                 Log.d(TAG, "syncChat: userId=$userId, lastOffset=$lastOffset")
+                FileLogger.log(TAG, "syncChat REQ userId=$userId offset=$lastOffset")
 
                 val channelApi = ApiClient.createChannelApiFromBaseUrl(appConfig.getRestBaseUrl(), token)
                 val endpoint = appConfig.getEndpoint(EP_COMM_SYNC_CHAT, "api/comm/syncchat")
@@ -316,6 +331,7 @@ class ChannelSyncRepository(
                     reader.endObject()
                 }
                 Log.d(TAG, "syncChat page: events=${eventsArray.size}, lastEventId=$lastEventId, errorCode=$errorCode")
+                FileLogger.log(TAG, "syncChat RES events=${eventsArray.size} lastEventId=$lastEventId errorCode=$errorCode")
 
                 if (errorCode != 0) return@withContext false
 
@@ -324,10 +340,34 @@ class ChannelSyncRepository(
                 val deletedChats = mutableListOf<Pair<String, String>>()
                 val reactionUpdates = mutableListOf<Pair<String, JSONObject>>()
                 val lastChatPerChannel = mutableMapOf<String, JSONObject>()
+                val readOffsets = mutableListOf<ChannelOffsetEntity>()
+                // 내 채널 가입 시점 캐시 — 내가 방에 들어오기 전의 메시지(초대 SYSTEM 포함)는 skip 하기 위해 사용
+                val myRegistDateCache = mutableMapOf<String, Long>()
+                suspend fun getMyRegistDate(channelCode: String): Long {
+                    myRegistDateCache[channelCode]?.let { return it }
+                    val v = if (userId.isEmpty() || channelCode.isEmpty()) 0L
+                            else chatDb.channelMemberDao().getMember(channelCode, userId)?.registDate ?: 0L
+                    myRegistDateCache[channelCode] = v
+                    return v
+                }
 
                 if (eventsArray.isNotEmpty()) {
+                    var readEventCount = 0
                     for (event in eventsArray) {
                         val eventType = event.optString("eventType", "")
+
+                        if (eventType == "READ") {
+                            readEventCount++
+                            val readUserId = event.optString("readUserId", "")
+                            val readDate = event.optLong("readDate", 0L)
+                            val readChannelCode = event.optString("channelCode", "")
+                            if (readUserId.isNotEmpty() && readDate > 0 && readChannelCode.isNotEmpty()) {
+                                readOffsets.add(ChannelOffsetEntity(channelCode = readChannelCode, userId = readUserId, offsetDate = readDate))
+                            }
+                            continue
+                        }
+                        if (BuildConfig.DEBUG) Log.d(TAG, "syncChat event: type=$eventType raw=${event.toString().take(600)}")
+
                         val c = event.optJSONObject("chat") ?: continue
                         val channelCode = c.optString("channelCode", "")
                         val chatCode = c.optString("chatCode", "")
@@ -347,13 +387,37 @@ class ChannelSyncRepository(
 
                         when (eventType) {
                             "ADD" -> {
+                                val contents = c.optString("contents", "")
+                                // chatType 매핑:
+                                //  - 문자열: "AI"/"ai" → -99, "SYSTEM"/"system" → 99 (실시간 WS 경로)
+                                //  - 숫자: 6 → 99 (서버 sync REST 에서 SYSTEM을 6으로 내려줌 — 입장/퇴장/초대)
+                                //          그 외 숫자는 그대로 유지 (1=TALK 등)
+                                val rawChatType = c.opt("chatType")
+                                val resolvedChatType = when {
+                                    rawChatType == "AI" || rawChatType == "ai" -> -99
+                                    rawChatType == "SYSTEM" || rawChatType == "system" -> 99
+                                    rawChatType is Number -> {
+                                        val n = rawChatType.toInt()
+                                        if (n == 6) 99 else n
+                                    }
+                                    else -> c.optInt("chatType", 0)
+                                }
+                                // 내가 방에 가입한 시점 이전(포함)의 메시지(초대 SYSTEM 포함)는 저장하지 않음.
+                                // 서버는 멤버 합류 후 채널 history 를 모두 내려주지만, 클라이언트는 가입 이후 내용만 보여야 함.
+                                // 나를 초대한 SYSTEM 메시지는 sendDate == 내 registDate 로 같으므로 `<=` 로 비교.
+                                val myRegistDate = getMyRegistDate(channelCode)
+                                if (myRegistDate > 0L && sendDate > 0L && sendDate <= myRegistDate) {
+                                    if (BuildConfig.DEBUG) Log.d(TAG, "syncChat ADD: skipped (pre-join) chatCode=$chatCode, channel=$channelCode, sendDate=$sendDate <= myRegistDate=$myRegistDate, contents=${contents.take(40)}")
+                                    continue
+                                }
+                                if (BuildConfig.DEBUG) Log.d(TAG, "syncChat ADD: chatCode=$chatCode, channel=$channelCode, contents=${contents.take(50)}, sendDate=$sendDate, rawChatType=$rawChatType(${rawChatType?.javaClass?.simpleName}), resolvedChatType=$resolvedChatType, chatKeys=${c.keys().asSequence().toList()}")
                                 chats.add(ChatEntity(
                                     channelCode = channelCode,
                                     chatCode = chatCode,
                                     sendUserId = c.optString("sendUserId", ""),
-                                    contents = c.optString("contents", ""),
+                                    contents = contents,
                                     sendDate = sendDate,
-                                    chatType = c.optInt("chatType", 0),
+                                    chatType = resolvedChatType,
                                     chatFont = c.optString("chatFont", ""),
                                     additional = c.optJSONObject("additional")?.toString() ?: c.optString("additional", ""),
                                     state = c.optInt("state", 0)
@@ -364,20 +428,24 @@ class ChannelSyncRepository(
                                 }
                             }
                             "DEL" -> {
+                                if (BuildConfig.DEBUG) Log.d(TAG, "syncChat DEL: chatCode=$chatCode, channel=$channelCode")
                                 if (channelCode.isNotEmpty() && chatCode.isNotEmpty()) {
                                     deletedChats.add(channelCode to chatCode)
                                 }
                             }
                             "REACTION", "MOD" -> {
+                                if (BuildConfig.DEBUG) Log.d(TAG, "syncChat $eventType: chatCode=$chatCode")
                                 if (chatCode.isNotEmpty()) reactionUpdates.add(chatCode to c)
                             }
                         }
                     }
+                    if (readEventCount > 0) Log.d(TAG, "syncChat: $readEventCount READ events processed")
                 }
 
                 chatDb.runInTransaction {
                     if (chatEvents.isNotEmpty()) { chatDb.chatEventDao().insertAllSync(chatEvents); Log.d(TAG, "syncChat: ${chatEvents.size} chatEvents saved") }
                     if (chats.isNotEmpty()) { chatDb.chatDao().insertAllSync(chats); Log.d(TAG, "syncChat: ${chats.size} chats saved") }
+                    if (readOffsets.isNotEmpty()) { chatDb.channelOffsetDao().insertAllSync(readOffsets); Log.d(TAG, "syncChat: ${readOffsets.size} read offsets saved") }
                     for ((cc, chatCode) in deletedChats) { chatDb.chatDao().markDeletedByChatCodeSync(cc, chatCode) }
                     if (deletedChats.isNotEmpty()) Log.d(TAG, "syncChat: ${deletedChats.size} chats marked deleted")
                     for ((chatCode, chatObj) in reactionUpdates) {
@@ -410,9 +478,11 @@ class ChannelSyncRepository(
                 }
 
                 Log.d(TAG, "syncChat complete: ${chats.size} chats, lastEventId=$lastEventId")
+                FileLogger.log(TAG, "syncChat DONE chats=${chats.size} lastEventId=$lastEventId")
                 true
             } catch (e: Exception) {
                 Log.e(TAG, "syncChat error: ${e.message}", e)
+                FileLogger.log(TAG, "syncChat ERROR ${e.message}")
                 false
             }
         }

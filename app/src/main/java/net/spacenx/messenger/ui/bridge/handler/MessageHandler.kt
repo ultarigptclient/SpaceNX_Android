@@ -126,6 +126,7 @@ class MessageHandler(
                 obj.put("receivers", enrichedReceivers)
                 val attachInfoStr = msg["attachInfo"] as? String
                 obj.put("attachInfo", if (!attachInfoStr.isNullOrEmpty()) attachInfoStr else JSONObject.NULL)
+                obj.put("retrieved", msg["retrieved"] as? Boolean ?: false)
                 val sendUserId = msg["sendUserId"] as? String ?: ""
                 if (sendUserId.isNotEmpty()) obj.put("sendUserName", ctx.userNameCache.resolve(sendUserId))
                 eventsArray.put(obj)

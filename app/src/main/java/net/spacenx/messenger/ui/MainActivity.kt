@@ -56,6 +56,9 @@ import net.spacenx.messenger.ui.viewmodel.MainViewModel
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
 import org.json.JSONObject
+import android.view.View
+import android.widget.ImageButton
+import net.spacenx.messenger.util.FileLogger
 
 
 @AndroidEntryPoint
@@ -96,20 +99,47 @@ class MainActivity : AppCompatActivity() {
             "if(window.__bridgeShimInstalled)return;" +
             "window.__bridgeShimInstalled=true;" +
             "var pm={};" +
-            // JSON.stringify 래핑: postMessage 직전 _callbackId 기반 키로 resolve fn 캡처
+            // JSON.stringify 래핑: postMessage 직전 resolve fn 캡처 (동시 호출 슬롯 덮어쓰기 방지)
             "var os=JSON.stringify;" +
             "JSON.stringify=function(o){" +
-            "if(o&&typeof o==='object'&&o.action==='openUserDetail'&&o._callbackId){" +
+            "if(o&&typeof o==='object'){" +
+            // openUserDetail: _callbackId 기반 큐
+            "if(o.action==='openUserDetail'&&o._callbackId){" +
             "var key='_'+o._callbackId+'Resolve';" +
             "var fn=window[key];" +
             "if(typeof fn==='function'){" +
             "(pm[o._callbackId]=pm[o._callbackId]||[]).push(fn);" +
-            "window[key]=null;}}" +
+            "window[key]=null;}" +
+            // getMyPart: 단일 action 큐 (callbackId 없이 동시 다중 호출 처리)
+            "}else if(o.action==='getMyPart'){" +
+            "var fn2=window._getMyPartResolve;" +
+            "if(typeof fn2==='function'){" +
+            "(pm['getMyPart']=pm['getMyPart']||[]).push(fn2);" +
+            "window._getMyPartResolve=null;}" +
+            // getOrgSubList: 동시 다중 호출 처리 (내 부서 멤버 목록 race condition 방지)
+            "}else if(o.action==='getOrgSubList'){" +
+            "var fn3=window._getOrgSubListResolve;" +
+            "if(typeof fn3==='function'){" +
+            "(pm['getOrgSubList']=pm['getOrgSubList']||[]).push(fn3);" +
+            "window._getOrgSubListResolve=null;}}" +
+            "}" +
             "return os.apply(JSON,arguments);};" +
             // Android OrgHandler 가 호출: pm[cbId] 에 쌓인 resolve 전부 실행
             "window.__oudResolve=function(cbId,d){" +
             "if(pm[cbId]&&pm[cbId].length){" +
             "var fns=pm[cbId].splice(0);delete pm[cbId];" +
+            "for(var i=0;i<fns.length;i++){try{fns[i](d);}catch(e){}}" +
+            "return true;}return false;};" +
+            // getMyPart resolve 디스패처
+            "window.__gmpResolve=function(d){" +
+            "if(pm['getMyPart']&&pm['getMyPart'].length){" +
+            "var fns=pm['getMyPart'].splice(0);delete pm['getMyPart'];" +
+            "for(var i=0;i<fns.length;i++){try{fns[i](d);}catch(e){}}" +
+            "return true;}return false;};" +
+            // getOrgSubList resolve 디스패처
+            "window.__goslResolve=function(d){" +
+            "if(pm['getOrgSubList']&&pm['getOrgSubList'].length){" +
+            "var fns=pm['getOrgSubList'].splice(0);delete pm['getOrgSubList'];" +
             "for(var i=0;i<fns.length;i++){try{fns[i](d);}catch(e){}}" +
             "return true;}return false;};" +
             "})();"
@@ -125,6 +155,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var webView: WebView
     private lateinit var subWebView: WebView
     private lateinit var inAppBanner: InAppBannerView
+    private lateinit var btnDevLog: ImageButton
+    var pendingSubWebViewContext: String? = null
     private lateinit var bridgeDispatcher: BridgeDispatcher
     private lateinit var statusBarManager: StatusBarManager
     private lateinit var updateChecker: AppUpdateChecker
@@ -329,6 +361,11 @@ class MainActivity : AppCompatActivity() {
             )
         }
 
+        btnDevLog = findViewById(R.id.btnDevLog)
+        btnDevLog.setOnClickListener {
+            startActivity(Intent(this@MainActivity, ConfigLogFileActivity::class.java))
+        }
+
         // WebView + 서브 WebView + 인앱 배너 초기화
         webView = findViewById(R.id.webView)
         subWebView = findViewById(R.id.subWebView)
@@ -457,7 +494,10 @@ class MainActivity : AppCompatActivity() {
             databaseProvider = databaseProvider,
             mainViewModel = mainViewModel,
             scope = lifecycleScope,
-            onLoggedIn = { pushEventRouter.register() },
+            onLoggedIn = {
+                pushEventRouter.register()
+                runOnUiThread { btnDevLog.visibility = View.VISIBLE }
+            },
             hasPendingDeepLink = { pendingDeepLinkIntent != null },
             onConsumeDeepLink = { consumePendingDeepLink() },
             setClearAuthOnNextLoad = { v -> clearAuthOnNextLoad = v }
@@ -541,15 +581,29 @@ class MainActivity : AppCompatActivity() {
                                 val mobileIcon = u.optInt("mobileIcon", 0)
                                 val pcIcon = u.optInt("icon", 0)
                                 val isMe = u.optString("userId") == myUserId
-                                val icon = if (isMe && myStatusCode > 0) {
-                                    myStatusCode
+                                // mobileIcon = 모바일 기기 연결 여부 플래그 (1=접속중, 0=미접속) — 상태 코드가 아님
+                                // icon      = 사용자가 명시적으로 설정한 상태 (자리비움=2, 다른용무중=3 등)
+                                // 본인: 서버 icon(명시적 상태) 우선 → 서버가 0이면 로컬 저장값으로 복원
+                                // 타인: mobileIcon(모바일 접속중) > 0 이면 mobileIcon, 아니면 pcIcon
+                                val icon = if (isMe) {
+                                    when {
+                                        pcIcon > 0 -> pcIcon
+                                        myStatusCode > 0 -> myStatusCode
+                                        else -> 0
+                                    }
                                 } else {
                                     if (mobileIcon > 0) mobileIcon else pcIcon
                                 }
                                 u.put("icon", icon)
-                                // 서버가 nick을 빈값으로 내려줘도 로컬 저장값으로 복원
-                                if (isMe && myNick.isNotEmpty() && u.optString("nick").isEmpty()) {
-                                    u.put("nick", myNick)
+                                if (isMe) {
+                                    val serverNick = u.optString("nick")
+                                    if (serverNick.isNotEmpty()) {
+                                        // 서버 nick이 있으면 로컬 캐시 갱신 (다른 기기에서 변경된 경우 반영)
+                                        if (serverNick != myNick) appConfig.saveMyNick(serverNick)
+                                    } else if (myNick.isNotEmpty()) {
+                                        // 서버가 빈값으로 내려줘도 로컬 저장값으로 복원
+                                        u.put("nick", myNick)
+                                    }
                                 }
                             }
                         }
@@ -707,11 +761,27 @@ class MainActivity : AppCompatActivity() {
 
     override fun onStop() {
         super.onStop()
+        // ProcessLifecycleOwner는 ~700ms 디바운스가 있어 FCM 억제 타이밍 레이스 발생 가능.
+        // Activity onStop에서 즉시 false로 세팅해 백키/홈키 직후 FCM이 와도 억제되도록 함.
+        net.spacenx.messenger.common.AppState.isForeground = false
+        isAppInForeground = false
         // unsubscribeAll은 appLifecycleObserver.onStop에서 처리 (소켓 끊기 전 전송)
     }
 
     override fun onStart() {
         super.onStart()
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        // Android WebView는 requestFocus() 없이 document.hasFocus()가 false를 반환함.
+        // useChatRoom.js가 focusChannel을 호출하려면 hasFocus()=true + window.focus 이벤트가 필요.
+        if (hasFocus) {
+            webView.requestFocus()
+            webView.post { webView.evaluateJavascript("window.dispatchEvent(new Event('focus'))", null) }
+        } else {
+            webView.post { webView.evaluateJavascript("window.dispatchEvent(new Event('blur'))", null) }
+        }
     }
 
     override fun onResume() {
@@ -720,6 +790,7 @@ class MainActivity : AppCompatActivity() {
             overlayPermissionPopup = false
             requestPermission()
         }
+        updateChecker.check(getUpdateUrl())
     }
 
     override fun onDestroy() {
@@ -905,6 +976,7 @@ class MainActivity : AppCompatActivity() {
             webView.evaluateJavascript("window._agreePrivacyPolicyResolve()", null)
         } catch (e: Exception) {
             Log.e(TAG, "onAgreePrivacyPolicyFromWeb error", e)
+            FileLogger.log(TAG, "onAgreePrivacyPolicyFromWeb ERROR ${e.message}")
             val escapedMsg = e.message?.replace("'", "\\'") ?: "Unknown error"
             webView.evaluateJavascript("window._agreePrivacyPolicyReject('$escapedMsg')", null)
         }
@@ -915,6 +987,7 @@ class MainActivity : AppCompatActivity() {
     fun requestLogout() {
         Log.d(TAG, "requestLogout called")
         isLogoutRequested = true
+        btnDevLog.visibility = View.GONE
         loginViewModel.logout()
     }
 
@@ -929,6 +1002,10 @@ class MainActivity : AppCompatActivity() {
     fun onAutoLoginFromWeb() {
         Log.d(TAG, "onAutoLoginFromWeb")
         isAutoLogin = true
+        if (loginViewModel.sessionManager.jwtToken != null) {
+            Log.d(TAG, "onAutoLoginFromWeb: token already present, skipping reconnect")
+            return
+        }
         reconnectSocket()
     }
 
@@ -940,8 +1017,12 @@ class MainActivity : AppCompatActivity() {
 
     /** getClientState에서 needLogin=false일 때 호출 — refreshToken으로 자동 로그인 */
     fun triggerAutoReconnect(userId: String) {
-        Log.d(TAG, "triggerAutoReconnect: userId=$userId")
         isAutoLogin = true
+        if (loginViewModel.sessionManager.jwtToken != null) {
+            Log.d(TAG, "triggerAutoReconnect: token already present, skipping reconnect")
+            return
+        }
+        Log.d(TAG, "triggerAutoReconnect: userId=$userId")
         reconnectSocket()
     }
 
@@ -1022,6 +1103,12 @@ class MainActivity : AppCompatActivity() {
             allowContentAccess = false
             cacheMode = android.webkit.WebSettings.LOAD_CACHE_ELSE_NETWORK
         }
+        subWebView.webChromeClient = object : android.webkit.WebChromeClient() {
+            override fun onConsoleMessage(msg: android.webkit.ConsoleMessage): Boolean {
+                Log.d("SubWebConsole", msg.message())
+                return true
+            }
+        }
         subWebView.webViewClient = object : WebViewClient() {
             override fun onReceivedSslError(
                 view: WebView?, handler: android.webkit.SslErrorHandler?, error: android.net.http.SslError?
@@ -1087,6 +1174,36 @@ class MainActivity : AppCompatActivity() {
             override fun onPageFinished(view: WebView?, url: String?) {
                 super.onPageFinished(view, url)
                 Log.d(TAG, "SubWebView loaded: $url")
+                // history.back() / window.close() → bridge closeWindow 으로 가로채기
+                val closeInterceptJs = """
+                    (function(){
+                        if(window.__nativeCloseInstalled)return;
+                        window.__nativeCloseInstalled=true;
+                        var _doClose=function(){
+                            try{window.AndroidBridge.postMessage(JSON.stringify({action:'closeWindow'}));}catch(e){}
+                        };
+                        window.close=_doClose;
+                        var _origBack=window.history.back.bind(window.history);
+                        window.history.back=function(){
+                            if(!window.history.state&&window.history.length<=1){_doClose();return;}
+                            _origBack();
+                        };
+                    })();
+                """.trimIndent()
+                view?.evaluateJavascript(closeInterceptJs, null)
+                // 수신자 정보 주입 (pendingSubWebViewContext 가 세팅된 경우)
+                val ctx = pendingSubWebViewContext
+                if (ctx != null) {
+                    pendingSubWebViewContext = null
+                    val escaped = JsEscapeUtil.escapeForJs(ctx)
+                    view?.evaluateJavascript(
+                        "try{var d=JSON.parse('$escaped');" +
+                        "window._neoInitData=d;" +
+                        "if(typeof window.initPage==='function')window.initPage(d);" +
+                        "}catch(e){console.error('[SubWebView] initPage inject error:',e);}", null
+                    )
+                    Log.d(TAG, "SubWebView: injected _nativeContext")
+                }
             }
         }
         // 서브 WebView에서도 closeWindow/closeApp → 서브 닫기
@@ -1098,7 +1215,8 @@ class MainActivity : AppCompatActivity() {
                     val action = obj.optString("action", "")
                     Log.d(TAG, "SubWebView bridge: action=$action")
                     when (action) {
-                        "closeWindow", "closeApp", "finishApp" -> runOnUiThread { closeSubWebView() }
+                        "closeWindow", "closeApp", "finishApp",
+                        "close", "back", "goBack", "cancel", "closeSubWindow" -> runOnUiThread { closeSubWebView() }
                         else -> {
                             // 다른 액션은 메인 BridgeDispatcher로 위임
                             runOnUiThread { bridgeDispatcher.dispatch(action, WebAppBridge.parseParams(obj)) }
@@ -1106,6 +1224,7 @@ class MainActivity : AppCompatActivity() {
                     }
                 } catch (e: Exception) {
                     Log.e(TAG, "SubWebView bridge error: ${e.message}")
+                    FileLogger.log(TAG, "SubWebView bridge ERROR ${e.message}")
                 }
             }
         }, WebAppBridge.NAME)

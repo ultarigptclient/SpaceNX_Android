@@ -3,6 +3,7 @@ package net.spacenx.messenger.ui
 import android.content.Context
 import android.util.Log
 import android.webkit.WebView
+import net.spacenx.messenger.util.FileLogger
 import androidx.appcompat.app.AppCompatActivity
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
@@ -156,6 +157,7 @@ class LoginStateCoordinator(
 
     private fun handleFailed(state: LoginState.Failed) {
         mainViewModel.isForegroundResume = false
+        FileLogger.log(TAG, "LoginState FAILED: ${state.message}")
         if (state.message == "TOKEN_EXPIRED") return  // 내부 재시도용, 웹에 전달 안 함
 
         if (state.message == "TOKEN_INVALID") {
@@ -191,6 +193,8 @@ class LoginStateCoordinator(
     // ── Disconnected ──
 
     private fun handleDisconnected() {
+        // 이전 세션의 pending sync 콜백을 즉시 reject — 새 sync 콜백 등록 전에 호출해야 60s 타임아웃 방지
+        bridgeDispatcher.flushStaleSyncCallbacks()
         webView.evaluateJavascript(
             "window.Transport && window.Transport.onNativeStatus('disconnected')", null
         )

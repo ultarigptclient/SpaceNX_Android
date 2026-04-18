@@ -3,6 +3,8 @@ package net.spacenx.messenger.data.repository
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import net.spacenx.messenger.BuildConfig
+import net.spacenx.messenger.util.FileLogger
 import kotlinx.coroutines.withTimeoutOrNull
 import net.spacenx.messenger.common.AppConfig
 import net.spacenx.messenger.common.AppConfig.Companion.EP_BUDDY_SYNC_BUDDY
@@ -50,6 +52,7 @@ class BuddyRepository(
                 val buddyEventOffset = orgDb.syncMetaDao().getValueSync(SYNC_META_OFFSET_KEY) ?: 0L
 
                 Log.d(TAG, "syncBuddy: userId=$userId, lastSyncTime=$lastSyncTime, buddyEventOffset=$buddyEventOffset")
+                FileLogger.log(TAG, "syncBuddy REQ userId=$userId lastSyncTime=$lastSyncTime offset=$buddyEventOffset")
 
                 val buddyApi = ApiClient.createBuddyApiFromBaseUrl(appConfig.getRestBaseUrl(), token)
                 val endpoint = appConfig.getEndpoint(EP_BUDDY_SYNC_BUDDY, "api/buddy/syncbuddy")
@@ -142,9 +145,11 @@ class BuddyRepository(
                 }
 
                 Log.d(TAG, "syncBuddy complete: serverTime=$serverTime, offset=$newOffset, removed=${removedKeys.size}")
+                FileLogger.log(TAG, "syncBuddy DONE buddies=${buddies.size} removed=${removedKeys.size} newOffset=$newOffset")
                 return@withContext true
             } catch (e: Exception) {
                 Log.e(TAG, "syncBuddy error: ${e.message}", e)
+                FileLogger.log(TAG, "syncBuddy ERROR ${e.message}")
                 return@withContext false
             }
         }
@@ -169,6 +174,7 @@ class BuddyRepository(
                 val rawJson = response.body()?.string() ?: "{}"
                 val json = JSONObject(rawJson)
                 Log.d(TAG, "syncMyPart response: $rawJson")
+                FileLogger.log(TAG, "syncMyPart RES errorCode=${json.optInt("errorCode", -1)}")
 
                 if (json.optInt("errorCode", -1) != 0) {
                     Log.e(TAG, "syncMyPart error: errorCode=${json.optInt("errorCode")}")
@@ -189,6 +195,7 @@ class BuddyRepository(
                 appConfig.saveMyDeptId(myDeptId)
 
                 Log.d(TAG, "syncMyPart complete: myDeptId=$myDeptId saved")
+                FileLogger.log(TAG, "syncMyPart DONE myDeptId=$myDeptId")
                 return@withContext true
             } catch (e: Exception) {
                 Log.e(TAG, "syncMyPart error: ${e.message}", e)
@@ -203,11 +210,13 @@ class BuddyRepository(
         return withContext(Dispatchers.IO) {
             val orgDb = databaseProvider.getOrgDatabase()
             val allBuddies = orgDb.buddyDao().getAll()
-            Log.d(TAG, "getBuddyList: ===== buddies dump (${allBuddies.size}) =====")
-            allBuddies.forEach { b ->
-                Log.d(TAG, "getBuddyList: id=${b.buddyId}, parent=${b.buddyParent}, name=${b.buddyName}, type=${b.buddyType}, order=${b.buddyOrder}")
+            if (BuildConfig.DEBUG) {
+                Log.d(TAG, "getBuddyList: ===== buddies dump (${allBuddies.size}) =====")
+                allBuddies.forEach { b ->
+                    Log.d(TAG, "getBuddyList: id=${b.buddyId}, parent=${b.buddyParent}, name=${b.buddyName}, type=${b.buddyType}, order=${b.buddyOrder}")
+                }
+                Log.d(TAG, "getBuddyList: ===== end dump =====")
             }
-            Log.d(TAG, "getBuddyList: ===== end dump =====")
 
             // buddyType="0" 사용자들의 userId 추출 → UserEntity 배치 조회 (N+1 방지)
             val userBuddyIds = allBuddies

@@ -58,10 +58,11 @@ class NeoSendHandler(
             val result = withContext(Dispatchers.IO) {
                 ApiClient.postJson(ctx.appConfig.getEndpointByPath(path), body, token)
             }
-            ctx.resolveToJs(cbId, result)
 
-            // CUD 성공 후 SQLite에 즉시 반영
+            // CUD 성공 후 SQLite에 즉시 반영 — resolveToJs 이전에 저장해야
+            // React가 응답 직후 조회할 때 새 데이터가 DB에 있음
             withContext(Dispatchers.IO) { projectRepo.cacheAfterCud(path, body, result) }
+            ctx.resolveToJs(cbId, result)
 
             // CUD 성공 후 백그라운드 sync 트리거
             val syncType = projectRepo.getSyncTypeForPath(path)
@@ -73,6 +74,8 @@ class NeoSendHandler(
                         when (syncType) {
                             "project" -> { projectRepo.syncProject(); ctx.notifyReact("projectReady") }
                             "issue" -> { projectRepo.syncIssue(); ctx.notifyReact("issueReady") }
+                            "calendar" -> { projectRepo.syncCalendar(); ctx.notifyReactOnce("calReady") }
+                            "todo" -> { projectRepo.syncTodo(); ctx.notifyReactOnce("todoReady") }
                             "thread" -> {
                                 projectRepo.syncThread()
                                 // threadReady 이벤트에 chatCode/channelCode/commentCount 포함

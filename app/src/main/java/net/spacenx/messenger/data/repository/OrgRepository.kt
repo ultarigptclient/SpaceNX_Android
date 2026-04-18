@@ -3,6 +3,8 @@ package net.spacenx.messenger.data.repository
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import net.spacenx.messenger.BuildConfig
+import net.spacenx.messenger.util.FileLogger
 import kotlinx.coroutines.withTimeoutOrNull
 import net.spacenx.messenger.common.AppConfig
 import net.spacenx.messenger.common.AppConfig.Companion.EP_ORG_MY_PART
@@ -63,6 +65,7 @@ class OrgRepository(
                 val orgEventOffset = orgDb.syncMetaDao().getValueSync("orgEventOffset") ?: 0L
 
                 Log.d(TAG, "syncOrg: userId=$userId, lastSyncTime=$lastSyncTime, orgEventOffset=$orgEventOffset")
+                FileLogger.log(TAG, "syncOrg REQ userId=$userId lastSyncTime=$lastSyncTime offset=$orgEventOffset")
 
                 val baseUrl = appConfig.getRestBaseUrl()
                 val orgApi = ApiClient.createOrgApiFromBaseUrl(baseUrl, token)
@@ -209,10 +212,12 @@ class OrgRepository(
                 val txTime = System.currentTimeMillis() - txStart
                 Log.d(TAG, "syncOrg transaction complete: ${txTime}ms (depts=${depts.size}, users=${users.size}, removedUsers=${removedUIds.size})")
                 Log.d(TAG, "syncOrg complete: serverTime=$serverTime, userChanges=$lastSyncHadUserChanges")
+                FileLogger.log(TAG, "syncOrg DONE depts=${depts.size} users=${users.size} removedUsers=${removedUIds.size} newOffset=$newOrgOffset")
 
                 return@withContext true
             } catch (e: Exception) {
                 Log.e(TAG, "syncOrg error: ${e.message}", e)
+                FileLogger.log(TAG, "syncOrg ERROR ${e.message}")
                 return@withContext false
             }
         }
@@ -246,7 +251,7 @@ class OrgRepository(
         Log.d(TAG, "getRootDeptsAsJson() called, databaseProvider=$databaseProvider")
         val allDepts = databaseProvider.getOrgDatabase().deptDao().getAll()
         Log.d(TAG, "getRootDeptsAsJson: total depts in DB = ${allDepts.size}")
-        if (allDepts.isNotEmpty()) {
+        if (BuildConfig.DEBUG && allDepts.isNotEmpty()) {
             val samples = allDepts.take(5)
             samples.forEach { d ->
                 Log.d(TAG, "  dept sample: deptId=${d.deptId}, parentDept=${d.parentDept}, name=${d.deptName}")
@@ -276,15 +281,17 @@ class OrgRepository(
         Log.d(TAG, "getSubOrgAsJson() deptId=$deptId")
         val (childDepts, users) = getSubOrg(deptId)
         Log.d(TAG, "getSubOrgAsJson: childDepts=${childDepts.size}, users=${users.size}")
-        if (users.isNotEmpty()) {
+        if (BuildConfig.DEBUG && users.isNotEmpty()) {
             val sample = users.take(2)
             sample.forEach { u -> Log.d(TAG, "  user data: userId=${u.userId}, deptId=${u.deptId}, userInfo=${u.userInfo}, userOrder=${u.userOrder}") }
         }
         if (users.isEmpty()) {
             val allUsers = databaseProvider.getOrgDatabase().userDao().getAll()
             Log.d(TAG, "getSubOrgAsJson: total users in DB = ${allUsers.size}")
-            val sample = allUsers.take(3)
-            sample.forEach { u -> Log.d(TAG, "  user sample: userId=${u.userId}, deptId=${u.deptId}") }
+            if (BuildConfig.DEBUG) {
+                val sample = allUsers.take(3)
+                sample.forEach { u -> Log.d(TAG, "  user sample: userId=${u.userId}, deptId=${u.deptId}") }
+            }
         }
         val deptsArray = JSONArray()
         val userDao = databaseProvider.getOrgDatabase().userDao()

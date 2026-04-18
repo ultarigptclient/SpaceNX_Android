@@ -11,7 +11,7 @@ plugins {
     id("com.google.firebase.crashlytics")
 }
 
-val appVersionName = "8.4.9"
+val appVersionName = "8.4.10"
 val appVersionParts = appVersionName.split(".").map { it.toInt() }
 val appVersionCode = appVersionParts[0] * 10000 + appVersionParts[1] * 100 + appVersionParts[2]
 
@@ -155,7 +155,8 @@ dependencies {
     ksp(libs.androidx.room.compiler)
     implementation(libs.sqlcipher.android)
     implementation("androidx.security:security-crypto:1.1.0-alpha06") //2026-03-13 EncryptedSharedPreferences
-    implementation("io.livekit:livekit-android:2.5.0") // LiveKit 통화
+    //2026-04-18 livekit 당장 미사용으로 의존성 제거함. 추후 주석 풀어야함
+    //implementation("io.livekit:livekit-android:2.5.0") // LiveKit 통화
     implementation(libs.kwik) // QUIC raw bidi stream (Gateway2:18029, ALPN "neo")
     implementation(libs.hilt.android)
     kapt(libs.hilt.compiler)

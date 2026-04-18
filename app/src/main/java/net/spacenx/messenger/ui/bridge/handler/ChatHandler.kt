@@ -78,6 +78,9 @@ class ChatHandler(
             val beforeDate = ctx.paramLong(params, "beforeDate")
 
             val chatDb = ctx.dbProvider.getChatDatabase()
+            // React 가 방 생성 화면에서 '__pending_group__' 같은 placeholder 로 getChatList 를 부르는 경우가 있어,
+            // 실제 채널 코드가 아니면 서버 syncChat fallback 을 돌지 않도록 차단 (불필요한 네트워크 + 로그 노이즈 방지).
+            val isRealChannelCode = channelCode.isNotEmpty() && !channelCode.startsWith("__")
             var chats = withContext(Dispatchers.IO) {
                 if (beforeDate != null && beforeDate > 0) {
                     chatDb.chatDao().getBeforeDate(channelCode, beforeDate, limit) ?: emptyList()
@@ -85,7 +88,7 @@ class ChatHandler(
                     chatDb.chatDao().getRecent(channelCode, limit) ?: emptyList()
                 }
             }
-            if (chats.isEmpty() && beforeDate == null) {
+            if (chats.isEmpty() && beforeDate == null && isRealChannelCode) {
                 withContext(Dispatchers.IO) {
                     try { channelRepo.syncChat(ctx.appConfig.getSavedUserId() ?: "") } catch (_: Exception) {}
                 }
@@ -99,8 +102,13 @@ class ChatHandler(
                 val myMember = withContext(Dispatchers.IO) {
                     chatDb.channelMemberDao().getMember(channelCode, myUserId)
                 }
+                Log.d(TAG, "getChatList: channelCode=$channelCode, chatsBeforeFilter=${chats.size}, myRegistDate=${myMember?.registDate}, chatDates=${chats.take(5).map { it.sendDate }}")
                 if (myMember != null && myMember.registDate > 0) {
+                    val before = chats.size
                     chats = chats.filter { it.sendDate >= myMember.registDate }
+                    if (chats.size != before) {
+                        Log.d(TAG, "getChatList: pre-join filter removed ${before - chats.size} chats (registDate=${myMember.registDate})")
+                    }
                 }
             }
 
@@ -112,6 +120,15 @@ class ChatHandler(
                 chatDb.channelOffsetDao().getByChannel(channelCode)
             }
             val offsetDates = allOffsets.map { it.offsetDate }
+
+            // 채널의 chatThread 매핑 → chat 객체에 commentCount/threadCode 주입
+            val threadMap = withContext(Dispatchers.IO) {
+                try {
+                    ctx.dbProvider.getProjectDatabase().chatThreadDao()
+                        .getByChannel(channelCode)
+                        .associateBy { it.chatCode }
+                } catch (_: Exception) { emptyMap() }
+            }
 
             val chatList = JSONArray()
             for (c in chats) {
@@ -125,6 +142,7 @@ class ChatHandler(
                 } else if (rawAdditional.contains("file", ignoreCase = true)) {
                     Log.d(TAG, "sanitizeAdditional [${c.chatCode}] unchanged=$rawAdditional")
                 }
+                val thread = threadMap[c.chatCode]
                 chatList.put(JSONObject().apply {
                     put("chatCode", c.chatCode)
                     put("channelCode", c.channelCode)
@@ -137,6 +155,8 @@ class ChatHandler(
                     put("chatFont", c.chatFont ?: "")
                     put("state", c.state)
                     put("unreadCount", unreadCount)
+                    put("commentCount", thread?.commentCount ?: 0)
+                    if (thread != null) put("threadCode", thread.threadCode)
                 })
             }
             ctx.resolveToJs("getChatList", JSONObject()
@@ -532,6 +552,7 @@ class ChatHandler(
             "DATE" -> 64
             "RTF" -> 128
             "CLOB" -> 256
+            "POLARIS" -> 512 or 8
             "TRANSFER" -> 1024
             "DRM" -> 2048
             "IMPORTANT" -> 4096

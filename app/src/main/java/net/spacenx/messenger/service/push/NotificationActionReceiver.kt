@@ -75,18 +75,30 @@ class NotificationActionReceiver : BroadcastReceiver() {
 
                     runBlocking(Dispatchers.IO) {
                         try {
-                            val body = JSONObject().apply {
+                            val sendBody = JSONObject().apply {
                                 put("channelCode", key)
                                 put("sendUserId", userId)
                                 put("contents", replyText)
                                 put("chatType", "TEXT")
                             }
                             val result = ApiClient.postJson(
-                                appConfig.getEndpointByPath("/comm/sendchat"), body
+                                appConfig.getEndpointByPath("/comm/sendchat"), sendBody
                             )
                             Log.d(TAG, "REPLY: sendChat result=${result.optInt("errorCode", -1)}")
                         } catch (e: Exception) {
                             Log.e(TAG, "REPLY: sendChat failed", e)
+                        }
+                        try {
+                            val readBody = JSONObject().apply {
+                                put("channelCode", key)
+                                put("readUserId", userId)
+                            }
+                            val result = ApiClient.postJson(
+                                appConfig.getEndpointByPath("/comm/readchat"), readBody
+                            )
+                            Log.d(TAG, "REPLY: readChat result=${result.optInt("errorCode", -1)}")
+                        } catch (e: Exception) {
+                            Log.e(TAG, "REPLY: readChat failed", e)
                         }
                     }
                     // 답장 전송 후 알림 취소

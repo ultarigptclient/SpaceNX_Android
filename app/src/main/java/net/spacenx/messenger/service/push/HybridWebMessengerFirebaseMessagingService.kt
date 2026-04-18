@@ -13,6 +13,7 @@ import kotlinx.coroutines.runBlocking
 import net.spacenx.messenger.common.AppConfig
 import net.spacenx.messenger.common.Constants
 import net.spacenx.messenger.data.local.DatabaseProvider
+import net.spacenx.messenger.data.repository.UserNameCache
 import org.json.JSONObject
 import javax.inject.Inject
 
@@ -58,6 +59,7 @@ class HybridWebMessengerFirebaseMessagingService : FirebaseMessagingService() {
     @Inject lateinit var appConfig: AppConfig
     @Inject lateinit var dbProvider: DatabaseProvider
     @Inject lateinit var notificationGroupManager: GroupNotificationManager
+    @Inject lateinit var userNameCache: UserNameCache
 
     private var notificationSettings: NotificationSettingsChecker = DefaultNotificationSettingsChecker()
 
@@ -158,7 +160,7 @@ class HybridWebMessengerFirebaseMessagingService : FirebaseMessagingService() {
         try {
             Log.d(TAG, "processDataEntry raw: $value")
             //processDataEntry raw: {"id":"jse","name":"전수은","comm":"대화3","systemName":null,"key":"mo19sh5rUFZFajikBcF","date":"1776338366677","PCICON":"Y","badgeCount":1024,"messageType":"CHAT"}
-            //processDataEntry raw: {"id":null,"name":"","comm":"<p style=\"text-align: left;\">4444444444</p>","systemName":null,"key":"MESSAGE","date":null,"PCICON":"Y","badgeCount":1025,"messageType":"MESSAGE"}
+            //processDataEntry raw: {"id":jse,"name":"","comm":"<p style=\"text-align: left;\">4444444444</p>","systemName":null,"key":"MESSAGE","date":null,"PCICON":"Y","badgeCount":1025,"messageType":"MESSAGE"}
 
             val myId = Constants.getMyId(applicationContext)
             if (myId.isNullOrEmpty()) return
@@ -186,7 +188,7 @@ class HybridWebMessengerFirebaseMessagingService : FirebaseMessagingService() {
                 else             -> "새 메시지가 도착했습니다."
             }
             val senderId = json.optString("id", "").takeIf { it != "null" } ?: ""
-            val userName = json.optString("name", "")
+            val userName = json.optString("name", "").takeIf { it != "null" } ?: ""
             val systemName = json.optString("systemName", "")
             val url = json.optString("url", "")
             val badgeCount = json.optInt("badgeCount", 0)
@@ -263,23 +265,9 @@ class HybridWebMessengerFirebaseMessagingService : FirebaseMessagingService() {
 
         if (message.startsWith("[AUTO_DELETE_CHAT]")) return
 
-        // 포그라운드 + 현재 열려 있는 채널이면 FCM 시스템 알림 억제
-        // (소켓 경로의 MainActivity.showPushNotification이 이미 활성 채널 여부에 따라 처리)
-        if (type == Constants.TYPE_TALK
-            && net.spacenx.messenger.common.AppState.isForeground
-            && net.spacenx.messenger.common.AppState.activeChannelCode == key
-        ) {
-            Log.d(TAG, "sendNotification: suppressed (active channel $key)")
-            return
-        }
-
-        // 포그라운드 상태에서 MSG FCM 억제: 소켓이 SendMessageEvent/ReadMessageEvent를
-        // 실시간으로 처리하므로 FCM은 중복. 특히 서버가 쪽지 발신자에게도 FCM을 잘못
-        // 전송하는 경우 자기 자신에게 알림이 뜨는 문제를 방지.
-        if (type == Constants.TYPE_MESSAGE
-            && net.spacenx.messenger.common.AppState.isForeground
-        ) {
-            Log.d(TAG, "sendNotification: suppressed MSG (foreground)")
+        // 포그라운드면 모든 FCM 억제 — 소켓/인앱 경로가 이미 처리함
+        if (net.spacenx.messenger.common.AppState.isForeground) {
+            Log.d(TAG, "sendNotification: suppressed (foreground) type=$type")
             return
         }
 
@@ -314,7 +302,17 @@ class HybridWebMessengerFirebaseMessagingService : FirebaseMessagingService() {
             } catch (_: Exception) { null }
         } else null
 
-        notificationGroupManager.showNotify(type, key, userName, message, arg, conversationTitle, senderId)
+        // 쪽지: name이 없으면 UserNameCache(캐시→org.db)로 이름 조회
+        val resolvedUserName: String = if (type == Constants.TYPE_MESSAGE && userName.isBlank()) {
+            if (senderId.isNotBlank()) {
+                try {
+                    val resolved = runBlocking(Dispatchers.IO) { userNameCache.resolve(senderId) }
+                    if (resolved == senderId) "쪽지 수신" else resolved
+                } catch (_: Exception) { "쪽지 수신" }
+            } else "쪽지 수신"
+        } else userName
+
+        notificationGroupManager.showNotify(type, key, resolvedUserName, message, arg, conversationTitle, senderId)
     }
 
     private fun isScreenOn(): Boolean {

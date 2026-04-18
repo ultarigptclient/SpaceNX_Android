@@ -9,6 +9,8 @@ import net.spacenx.messenger.data.local.entity.ChannelEntity
 import net.spacenx.messenger.data.local.entity.ChannelMemberEntity
 import net.spacenx.messenger.data.local.entity.ChannelOffsetEntity
 import net.spacenx.messenger.data.local.entity.ChatEntity
+import net.spacenx.messenger.data.local.entity.CalEventEntity
+import net.spacenx.messenger.data.local.entity.ChatThreadEntity
 import net.spacenx.messenger.data.local.entity.DeptEntity
 import net.spacenx.messenger.data.local.entity.UserEntity
 import net.spacenx.messenger.data.remote.socket.codec.ProtocolCommand
@@ -101,11 +103,30 @@ class PushEventHandler(
         val sendDate = data.optLong("sendDate", 0L)
         val additional = data.optJSONObject("additional")?.toString()
 
-        // AI 채팅 타입 처리: chatType 이 문자열 "AI"/"ai" 로 올 수 있음 (Flutter 동일 처리)
+        // chatType 매핑:
+        //  - 문자열: "AI"/"ai" → -99, "SYSTEM"/"system" → 99
+        //  - 숫자 6 → 99 (서버가 SYSTEM을 6으로 내려주는 경우 방어)
+        //  - 그 외 숫자는 그대로 유지
         val rawChatType = data.opt("chatType")
         val isAiChat = rawChatType == "AI" || rawChatType == "ai"
-        val chatType = if (isAiChat) -99 else (rawChatType as? Int ?: data.optInt("chatType", 0))
+        val isSystemChat = rawChatType == "SYSTEM" || rawChatType == "system" ||
+            (rawChatType is Number && rawChatType.toInt() == 6)
+        val chatType = when {
+            isAiChat -> -99
+            isSystemChat -> 99
+            rawChatType is Number -> rawChatType.toInt()
+            else -> data.optInt("chatType", 0)
+        }
         val sendUserId = if (isAiChat) "AI" else data.optString("sendUserId", "")
+
+        // 채널이 없는 상태에서 SYSTEM 메시지(초대/퇴장 등)만 먼저 도착한 경우,
+        // 방 생성은 MakeChannelEvent/AddChannelMemberEvent 가 담당하므로 여기서는 skip.
+        // (그 이벤트들이 도착하면 채널·멤버가 정상 생성되고, 해당 시점의 syncChat 로 SYSTEM 메시지가 함께 들어옴)
+        val existingChannel = chatDb.channelDao().getByChannelCode(channelCode)
+        if (existingChannel == null && isSystemChat) {
+            Log.w(TAG, "handleSendChatEvent: channel $channelCode missing and chatType=SYSTEM — skip (let MakeChannel/AddMember event create channel)")
+            return
+        }
 
         val chatEntity = ChatEntity(
             channelCode = channelCode,
@@ -119,8 +140,8 @@ class PushEventHandler(
 
         chatDb.chatDao().insert(chatEntity)
 
-        // 로컬에 채널이 없으면 syncChannel로 채널 정보 가져오기
-        val channel = chatDb.channelDao().getByChannelCode(channelCode)
+        // 로컬에 채널이 없으면 syncChannel로 채널 정보 가져오기 (일반 메시지 수신 fallback)
+        val channel = existingChannel
         if (channel == null) {
             Log.w(TAG, "handleSendChatEvent: channel $channelCode not found locally, triggering syncChannel")
             val userId = appConfig.getSavedUserId() ?: ""
@@ -348,6 +369,9 @@ class PushEventHandler(
             }
         }
 
+        // 2026-04-18: 서버가 SendChatEvent(chatType="SYSTEM")로 입장 메시지를 별도 내려주므로 자체 생성 비활성화 (중복 방지).
+        //             서버 경로 이상 시 복구할 수 있게 코드는 주석으로 보존.
+        /*
         // 입장 시스템 메시지 삽입
         if (channelCode.isNotEmpty() && addedUserIds.isNotEmpty()) {
             try {
@@ -372,6 +396,7 @@ class PushEventHandler(
                 }
             } catch (_: Exception) { }
         }
+        */
 
         Log.d(TAG, "handleAddChannelMemberEvent: channelCode=$channelCode, added=${addedUserIds}")
     }
@@ -428,6 +453,9 @@ class PushEventHandler(
             return
         }
 
+        // 2026-04-18: 서버가 SendChatEvent(chatType="SYSTEM")로 퇴장 메시지를 별도 내려주므로 자체 생성 비활성화 (중복 방지).
+        //             서버 경로 이상 시 복구할 수 있게 코드는 주석으로 보존.
+        /*
         // 퇴장 시스템 메시지 삽입 (타인 퇴장에만)
         if (channelCode.isNotEmpty() && removedUserIds.isNotEmpty()) {
             try {
@@ -452,6 +480,7 @@ class PushEventHandler(
                 }
             } catch (_: Exception) { }
         }
+        */
     }
 
     // ── 0x0296 SetChannelEvent: 채널 정보 갱신 ──
@@ -605,6 +634,29 @@ class PushEventHandler(
         // (서버는 0x28C ModThreadEvent 또는 0x299/0x29A 로 보낼 수 있음 — eventType 기준으로 판단)
         val eventType = data.optString("eventType", "")
 
+        if (commandCode == ProtocolCommand.MOD_CAL_EVENT.code) {
+            val calCode = data.optString("calCode", "")
+            val userId = data.optString("userId", appConfig.getSavedUserId() ?: "")
+            val calObj = data.optJSONObject("event") ?: JSONObject()
+            if (calCode.isNotEmpty() && eventType != "DELETE" && eventType != "DEL_CAL") {
+                try {
+                    val entity = pushCalObjToEntity(calObj, calCode, userId, data)
+                    dbProvider.getProjectDatabase().calEventDao().insertAll(listOf(entity))
+                    Log.d(TAG, "handleProjectEvent: MOD_CAL_EVENT $eventType → calCode=$calCode saved to DB")
+                } catch (e: Exception) {
+                    Log.e(TAG, "handleProjectEvent MOD_CAL_EVENT save error: ${e.message}", e)
+                }
+            } else if (calCode.isNotEmpty() && (eventType == "DELETE" || eventType == "DEL_CAL")) {
+                try {
+                    dbProvider.getProjectDatabase().calEventDao().delete(calCode)
+                    Log.d(TAG, "handleProjectEvent: MOD_CAL_EVENT DELETE → calCode=$calCode removed from DB")
+                } catch (e: Exception) {
+                    Log.e(TAG, "handleProjectEvent MOD_CAL_EVENT delete error: ${e.message}", e)
+                }
+            }
+            return
+        }
+
         if (eventType == "DELETE_ISSUE") {
             val issueCode = data.optString("issueCode", "")
             if (issueCode.isNotEmpty()) {
@@ -613,6 +665,29 @@ class PushEventHandler(
                     Log.d(TAG, "handleProjectEvent: DELETE_ISSUE → issueCode=$issueCode 삭제")
                 } catch (e: Exception) {
                     Log.e(TAG, "handleProjectEvent DELETE_ISSUE error: ${e.message}", e)
+                }
+            }
+            return
+        }
+
+        if (eventType == "CREATE_CHAT_THREAD") {
+            val threadCode = data.optString("threadCode", "")
+            val chatCode = data.optString("chatCode", "")
+            val channelCode = data.optString("channelCode", "")
+            if (threadCode.isNotEmpty() && chatCode.isNotEmpty()) {
+                try {
+                    val dao = dbProvider.getProjectDatabase().chatThreadDao()
+                    dao.insertChatThreads(listOf(ChatThreadEntity(
+                        chatCode = chatCode,
+                        threadCode = threadCode,
+                        channelCode = channelCode,
+                        commentCount = data.optInt("commentCount", 0),
+                        createdDate = data.optLong("modDate", 0L),
+                        chatContents = data.optString("chatContents", "")
+                    )))
+                    Log.d(TAG, "handleProjectEvent: CREATE_CHAT_THREAD → threadCode=$threadCode chatCode=$chatCode saved")
+                } catch (e: Exception) {
+                    Log.e(TAG, "handleProjectEvent CREATE_CHAT_THREAD save error: ${e.message}", e)
                 }
             }
             return
@@ -698,5 +773,42 @@ class PushEventHandler(
         } catch (e: Exception) {
             Log.e(TAG, "handleOrgEvent DB error: ${e.message}", e)
         }
+    }
+
+    private fun pushCalObjToEntity(calObj: JSONObject, calCode: String, fallbackUserId: String, root: JSONObject): CalEventEntity {
+        var startDate = calObj.optLong("startDate", 0L)
+        var endDate = calObj.optLong("endDate", 0L)
+        if (startDate == 0L) {
+            val eventDate = calObj.optString("eventDate", "")
+            startDate = parseDateTimeMs(eventDate, calObj.optString("startTime", ""))
+            if (endDate == 0L && startDate > 0L) {
+                endDate = parseDateTimeMs(eventDate, calObj.optString("endTime", ""))
+                if (endDate == 0L || endDate <= startDate) endDate = startDate + 3_600_000L
+            }
+        }
+        val userId = calObj.optString("userId", "").ifEmpty { root.optString("userId", fallbackUserId) }
+        return CalEventEntity(
+            calCode = calCode,
+            userId = userId.ifEmpty { fallbackUserId },
+            title = calObj.optString("title", ""),
+            description = calObj.optString("description", ""),
+            calType = calObj.optString("calType", calObj.optString("category", "PERSONAL")),
+            startDate = startDate,
+            endDate = endDate,
+            allDay = calObj.optInt("allDay", 0),
+            color = calObj.optString("color", ""),
+            location = calObj.optString("location", ""),
+            modDate = root.optLong("modDate", calObj.optLong("modDate", 0L)),
+            createdDate = calObj.optLong("createdDate", 0L)
+        )
+    }
+
+    private fun parseDateTimeMs(dateStr: String, timeStr: String): Long {
+        if (dateStr.isEmpty()) return 0L
+        return try {
+            val fullTime = if (timeStr.isEmpty()) "00:00" else timeStr
+            val sdf = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm", java.util.Locale.getDefault())
+            sdf.parse("$dateStr $fullTime")?.time ?: 0L
+        } catch (_: Exception) { 0L }
     }
 }

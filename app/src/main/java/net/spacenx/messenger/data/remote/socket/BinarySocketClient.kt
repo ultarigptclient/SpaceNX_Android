@@ -1,6 +1,5 @@
 package net.spacenx.messenger.data.remote.socket
 
-import android.content.Context
 import android.util.Log
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -15,13 +14,18 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeout
 import net.spacenx.messenger.data.remote.socket.codec.BinaryFrameCodec
 import net.spacenx.messenger.data.remote.socket.codec.ProtocolCommand
+import net.spacenx.messenger.util.FileLogger
 import java.io.ByteArrayOutputStream
+import java.io.IOException
 import java.net.InetSocketAddress
 import java.nio.ByteBuffer
 import java.nio.channels.AsynchronousSocketChannel
 import java.nio.channels.CompletionHandler
+import java.security.SecureRandom
+import java.util.Base64
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import javax.net.ssl.SSLEngine
@@ -31,19 +35,21 @@ import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
 /**
- * Binary Protocol 5.0 소켓 클라이언트
+ * Binary Protocol 소켓 클라이언트 (WebSocket over TLS)
  *
- * TalkSocketClient와 동일한 SSL/TLS + NIO.2 기반이나:
- * - 송신: BinaryFrameCodec.encode() → SSL wrap → channel write (SEED 암호화 없음)
- * - 수신: SSL unwrap → 길이 기반 프레임 조립 (0x0C 구분자 아님) → BinaryFrameCodec.decode()
- * - 킵얼라이브: NOOP 바이너리 프레임
+ * TLS 위에 WebSocket HTTP Upgrade를 수행한 뒤 raw bytes를 직접 처리.
+ * OkHttp text frame UTF-8 디코딩 우회 → bytes ≥ 0x80 손상 없음.
+ *
+ * 흐름:
+ *   TCP → TLS handshake → HTTP Upgrade (101) → text frame "WhoAU?\n"
+ *   → binary frame HI → ... binary frame 양방향 통신
  */
 class BinarySocketClient(
-    private val context: Context,
     private val config: ConnectionConfig,
     private val listener: BinarySocketEventListener,
     private val noopBodyProvider: (() -> ByteArray)? = null
 ) : NeoSocketBase {
+
     companion object {
         private const val TAG = "BinarySocketClient"
         private const val READ_TIMEOUT_SEC = 42L
@@ -56,14 +62,14 @@ class BinarySocketClient(
 
     // NIO
     private var socketChannel: AsynchronousSocketChannel? = null
-
-    // Coroutine
     private var clientScope: CoroutineScope? = null
-    // 재연결 폭주 시 OOM 방지 — bounded capacity + SUSPEND 백프레셔
     private val sendChannel = Channel<ByteArray>(capacity = 1024, onBufferOverflow = BufferOverflow.SUSPEND)
 
-    // 바이너리 프레임 조립용 accumulator
-    private val accumulator = ByteArrayOutputStream()
+    // WebSocket 수신 누산기 (raw bytes)
+    private val wsAccumulator = ByteArrayOutputStream()
+
+    // WebSocket 프레임 단편화(fragmentation) 조립 버퍼
+    private val wsFragmentBuffer = ByteArrayOutputStream()
 
     // SSL 버퍼
     private lateinit var myAppData: ByteBuffer
@@ -71,239 +77,208 @@ class BinarySocketClient(
     private lateinit var peerAppData: ByteBuffer
     private lateinit var peerNetData: ByteBuffer
 
-    // invokeId 카운터 (요청/응답 매칭)
     private val invokeIdCounter = AtomicInteger(0)
 
-    @Volatile
-    private var connected = false
+    @Volatile private var connected = false
 
-    /**
-     * 다음 invokeId 발급
-     */
-    override fun nextInvokeId(): Int = invokeIdCounter.incrementAndGet() and 0xFFFFFF // uint24 범위
+    override fun nextInvokeId(): Int = invokeIdCounter.incrementAndGet() and 0xFFFFFF
 
-    /**
-     * SSL 초기화 → TCP 연결 → 핸드셰이크 → 읽기/쓰기/킵얼라이브 루프 시작
-     */
+    // ── 연결 진입점 ──
+
     override suspend fun connect() {
         initSSL()
         openChannel()
         performHandshake()
+        sendWebSocketUpgrade()
+        awaitWebSocketUpgrade()
+        awaitWhoAU()
 
         connected = true
         clientScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
-
         clientScope?.launch { startReadLoop() }
         clientScope?.launch { startSendLoop() }
         clientScope?.launch { startKeepAlive() }
-
         listener.onConnected()
     }
 
-    /**
-     * 바이너리 프레임 전송 (commandCode + invokeId + JSON body)
-     * @return 사용된 invokeId
-     */
     override fun sendFrame(commandCode: Int, jsonBody: ByteArray, invokeId: Int): Int {
-        val frame = BinaryFrameCodec.encode(commandCode, invokeId, jsonBody)
-        val result = sendChannel.trySend(frame)
+        val payload = BinaryFrameCodec.encode(commandCode, invokeId, jsonBody)
+        val wsFrame = wrapWsFrame(payload, opcode = 0x02) // binary frame
+        val result = sendChannel.trySend(wsFrame)
         if (result.isFailure) {
-            // bounded(1024) 가 꽉 참 — 소켓 stall 또는 폭증 상황. drop 후 로그.
-            Log.w(TAG, "sendFrame dropped: channel full (cmd=$commandCode, invokeId=$invokeId)")
+            Log.w(TAG, "sendFrame dropped (channel full): cmd=$commandCode")
         }
         return invokeId
     }
 
-    /**
-     * 연결 종료 (listener에 onDisconnected 콜백 호출)
-     */
     override fun disconnect() {
-        Log.d(TAG, "disconnect() called")
         cleanup()
         listener.onDisconnected()
     }
 
-    /**
-     * 연결 종료 (listener 호출 없이 조용히 닫기)
-     */
     override fun disconnectSilently() {
-        Log.d(TAG, "disconnectSilently() called")
         cleanup()
     }
 
     private fun cleanup() {
         connected = false
-
         clientScope?.cancel()
         clientScope = null
-
-        try {
-            if (::sslEngine.isInitialized) {
-                sslEngine.closeOutbound()
-            }
-        } catch (_: Exception) {}
-
-        try {
-            socketChannel?.close()
-        } catch (_: Exception) {}
+        try { if (::sslEngine.isInitialized) sslEngine.closeOutbound() } catch (_: Exception) {}
+        try { socketChannel?.close() } catch (_: Exception) {}
         socketChannel = null
-
-        accumulator.reset()
+        wsAccumulator.reset()
+        wsFragmentBuffer.reset()
     }
 
-    // ── SSL 초기화 (ApiClient의 SSLContext 싱글톤 재사용) ──
+    // ── SSL ──
 
     private fun initSSL() {
-        Log.d(TAG, "Initializing SSL (shared SSLContext)")
-
         val sslContext = net.spacenx.messenger.data.remote.api.ApiClient.sslContext
-
         sslEngine = sslContext.createSSLEngine(config.host, config.port).apply {
             useClientMode = true
             enabledProtocols = arrayOf("TLSv1.3", "TLSv1.2")
         }
-
         val session = sslEngine.session
-        val appBufferSize = session.applicationBufferSize
-        val packetBufferSize = session.packetBufferSize
-
-        myAppData = ByteBuffer.allocate(appBufferSize)
-        myNetData = ByteBuffer.allocate(packetBufferSize)
-        peerAppData = ByteBuffer.allocate(appBufferSize)
-        peerNetData = ByteBuffer.allocate(packetBufferSize)
-
-        Log.d(TAG, "SSL initialized - appBuffer: $appBufferSize, packetBuffer: $packetBufferSize")
+        myAppData = ByteBuffer.allocate(session.applicationBufferSize)
+        myNetData = ByteBuffer.allocate(session.packetBufferSize)
+        peerAppData = ByteBuffer.allocate(session.applicationBufferSize)
+        peerNetData = ByteBuffer.allocate(session.packetBufferSize)
     }
 
     // ── TCP 연결 ──
 
     private suspend fun openChannel() {
-        Log.d(TAG, "Connecting to ${config.host}:${config.port}")
         socketChannel = AsynchronousSocketChannel.open()
-
         suspendCancellableCoroutine { cont ->
-            socketChannel!!.connect(
-                InetSocketAddress(config.host, config.port),
-                null,
+            socketChannel!!.connect(InetSocketAddress(config.host, config.port), null,
                 object : CompletionHandler<Void?, Void?> {
-                    override fun completed(result: Void?, attachment: Void?) {
-                        Log.d(TAG, "TCP connection established")
-                        cont.resume(Unit)
-                    }
-
-                    override fun failed(exc: Throwable, attachment: Void?) {
-                        Log.e(TAG, "TCP connection failed: ${exc.javaClass.simpleName}: ${exc.message}", exc)
-                        cont.resumeWithException(exc)
-                    }
-                }
-            )
-
-            cont.invokeOnCancellation {
-                try { socketChannel?.close() } catch (_: Exception) {}
-            }
+                    override fun completed(r: Void?, a: Void?) = cont.resume(Unit)
+                    override fun failed(e: Throwable, a: Void?) = cont.resumeWithException(e)
+                })
+            cont.invokeOnCancellation { socketChannel?.close() }
         }
+        Log.d(TAG, "TCP connected to ${config.host}:${config.port}")
     }
 
-    // ── SSL 핸드셰이크 (TalkSocketClient와 동일) ──
+    // ── TLS 핸드셰이크 ──
 
     private suspend fun performHandshake() {
-        Log.d(TAG, "Starting SSL handshake")
         sslEngine.beginHandshake()
-        var hsStatus = sslEngine.handshakeStatus
-
-        while (hsStatus != SSLEngineResult.HandshakeStatus.FINISHED
-            && hsStatus != SSLEngineResult.HandshakeStatus.NOT_HANDSHAKING
-        ) {
-            when (hsStatus) {
+        var hs = sslEngine.handshakeStatus
+        while (hs != SSLEngineResult.HandshakeStatus.FINISHED
+            && hs != SSLEngineResult.HandshakeStatus.NOT_HANDSHAKING) {
+            when (hs) {
                 SSLEngineResult.HandshakeStatus.NEED_UNWRAP -> {
-                    val bytesRead = readFromChannelBlocking()
-                    if (bytesRead < 0) throw SSLException("Channel closed during handshake")
-
-                    // 디버그: 서버 응답의 첫 바이트 확인
+                    readFromChannelBlocking()
                     peerNetData.flip()
-                    if (peerNetData.remaining() > 0) {
-                        val pos = peerNetData.position()
-                        val first5 = ByteArray(minOf(5, peerNetData.remaining()))
-                        peerNetData.get(first5)
-                        peerNetData.position(pos)
-                        Log.d(TAG, "Handshake raw bytes (${bytesRead}B): ${first5.joinToString(" ") { "0x%02X".format(it) }}")
-                    }
-
-                    var unwrapResult: SSLEngineResult
                     do {
                         peerAppData.clear()
-                        unwrapResult = sslEngine.unwrap(peerNetData, peerAppData)
-                        hsStatus = unwrapResult.handshakeStatus
-                        Log.d(TAG, "Unwrap - Status: ${unwrapResult.status}, HS: $hsStatus")
-                    } while (unwrapResult.status == SSLEngineResult.Status.OK
-                        && hsStatus == SSLEngineResult.HandshakeStatus.NEED_UNWRAP)
-
+                        val r = sslEngine.unwrap(peerNetData, peerAppData)
+                        hs = r.handshakeStatus
+                    } while (r.status == SSLEngineResult.Status.OK
+                        && hs == SSLEngineResult.HandshakeStatus.NEED_UNWRAP)
                     peerNetData.compact()
                 }
-
                 SSLEngineResult.HandshakeStatus.NEED_WRAP -> {
-                    myNetData.clear()
-                    myAppData.clear()
-                    myAppData.flip()
-                    val wrapResult = sslEngine.wrap(myAppData, myNetData)
-                    hsStatus = wrapResult.handshakeStatus
-                    Log.d(TAG, "Wrap - Status: ${wrapResult.status}, HS: $hsStatus")
-
+                    myNetData.clear(); myAppData.clear(); myAppData.flip()
+                    val r = sslEngine.wrap(myAppData, myNetData)
+                    hs = r.handshakeStatus
                     myNetData.flip()
                     writeToChannelBlocking(myNetData)
                 }
-
                 SSLEngineResult.HandshakeStatus.NEED_TASK -> {
                     var task = sslEngine.delegatedTask
-                    while (task != null) {
-                        task.run()
-                        task = sslEngine.delegatedTask
-                    }
-                    hsStatus = sslEngine.handshakeStatus
+                    while (task != null) { task.run(); task = sslEngine.delegatedTask }
+                    hs = sslEngine.handshakeStatus
                 }
-
-                else -> throw SSLException("Invalid handshake status: $hsStatus")
+                else -> throw SSLException("Invalid handshake status: $hs")
             }
         }
-
-        val protocol = sslEngine.session.protocol
-        val cipherSuite = sslEngine.session.cipherSuite
-        Log.d(TAG, "SSL handshake completed - Protocol: $protocol, CipherSuite: $cipherSuite")
+        Log.d(TAG, "TLS OK: ${sslEngine.session.protocol} ${sslEngine.session.cipherSuite}")
     }
 
-    // ── 읽기/쓰기 루프 ──
+    // ── WebSocket HTTP Upgrade ──
+
+    private suspend fun sendWebSocketUpgrade() {
+        val keyBytes = ByteArray(16).also { SecureRandom().nextBytes(it) }
+        val key = Base64.getEncoder().encodeToString(keyBytes)
+        val req = "GET / HTTP/1.1\r\n" +
+            "Host: ${config.host}:${config.port}\r\n" +
+            "Upgrade: websocket\r\n" +
+            "Connection: Upgrade\r\n" +
+            "Sec-WebSocket-Key: $key\r\n" +
+            "Sec-WebSocket-Version: 13\r\n\r\n"
+        sslSend(req.toByteArray(Charsets.US_ASCII))
+        Log.i(TAG, "[NeoHS 1/4] WebSocket Upgrade 전송")
+        FileLogger.log(TAG, "[NeoHS 1/4] WebSocket Upgrade 전송 → ${config.host}:${config.port}")
+    }
+
+    private suspend fun awaitWebSocketUpgrade() {
+        val acc = ByteArrayOutputStream()
+        withTimeout(10_000L) {
+            while (true) {
+                val chunk = sslRead() ?: throw IOException("Channel closed during WS upgrade")
+                acc.write(chunk)
+                val text = acc.toString(Charsets.US_ASCII.name())
+                val sep = text.indexOf("\r\n\r\n")
+                if (sep >= 0) {
+                    if (!text.startsWith("HTTP/1.1 101")) {
+                        throw IOException("WS upgrade failed: ${text.substringBefore('\r')}")
+                    }
+                    // 헤더 이후 남은 바이트는 wsAccumulator에 보관
+                    val extra = acc.toByteArray().drop(sep + 4).toByteArray()
+                    if (extra.isNotEmpty()) wsAccumulator.write(extra)
+                    Log.i(TAG, "[NeoHS 1/4] WebSocket 101 수신 OK")
+                    FileLogger.log(TAG, "[NeoHS 1/4] WebSocket 101 수신 OK")
+                    return@withTimeout
+                }
+            }
+        }
+    }
+
+    // ── WhoAU? 수신 ──
+
+    private suspend fun awaitWhoAU() {
+        withTimeout(10_000L) {
+            while (true) {
+                val frame = readNextWsFrame() ?: continue
+                val text = frame.toString(Charsets.UTF_8)
+                if (text.contains("WhoAU?")) {
+                    Log.i(TAG, "[NeoHS 2/4] WhoAU? 수신 (raw bytes) → onConnected() 예정")
+                    FileLogger.log(TAG, "[NeoHS 2/4] WhoAU? 수신 → onConnected() 예정")
+                    return@withTimeout
+                }
+            }
+        }
+    }
+
+    // ── 읽기 루프 ──
 
     private suspend fun startReadLoop() {
-        Log.d(TAG, "Read loop started")
-        peerNetData.clear()
-
         try {
             while (connected && clientScope?.isActive == true) {
-                val bytesRead = readFromChannelAsync()
-
-                if (bytesRead < 0) {
-                    Log.d(TAG, "Read loop: channel closed (bytesRead=$bytesRead)")
-                    break
-                }
-
-                if (bytesRead > 0) {
-                    peerNetData.flip()
-
-                    while (peerNetData.hasRemaining()) {
-                        peerAppData.clear()
-                        val result = sslEngine.unwrap(peerNetData, peerAppData)
-
-                        if (result.status == SSLEngineResult.Status.BUFFER_UNDERFLOW) break
-                        if (result.status != SSLEngineResult.Status.OK) {
-                            Log.w(TAG, "SSL unwrap failed: ${result.status}")
-                            break
-                        }
-
-                        peerAppData.flip()
-                        processReceivedBinaryData(peerAppData)
+                val payload = readNextWsFrame() ?: break
+                if (payload.isEmpty()) continue
+                try {
+                    val frame = BinaryFrameCodec.decode(payload)
+                    Log.d(TAG, "Frame received: $frame")
+                    val cmdName = net.spacenx.messenger.data.remote.socket.codec.ProtocolCommand.fromCode(frame.commandCode)?.protocol
+                        ?: "0x${frame.commandCode.toString(16)}"
+                    if (frame.commandCode != net.spacenx.messenger.data.remote.socket.codec.ProtocolCommand.NOOP.code) {
+                        FileLogger.log(TAG, "Frame recv: cmd=$cmdName invokeId=${frame.invokeId} size=${payload.size}B")
                     }
-
-                    peerNetData.compact()
+                    listener.onFrameReceived(frame)
+                } catch (e: Exception) {
+                    if (payload.isNotEmpty() && payload[0] == '{'.code.toByte()) {
+                        val json = String(payload, Charsets.UTF_8)
+                        Log.d(TAG, "Raw JSON frame received (${payload.size}B): $json")
+                        FileLogger.log(TAG, "Raw JSON frame recv: ${json.take(200)}")
+                        listener.onRawJsonFrame(json)
+                    } else {
+                        Log.e(TAG, "dispatchFrame error: ${e.message} (${payload.size}B)")
+                        FileLogger.log(TAG, "dispatchFrame error: ${e.message} (${payload.size}B)")
+                    }
                 }
             }
         } catch (e: CancellationException) {
@@ -312,19 +287,101 @@ class BinarySocketClient(
             Log.e(TAG, "Read loop error: ${e.message}")
             if (connected) listener.onError(e)
         }
+        if (connected) { connected = false; listener.onDisconnected() }
+    }
 
-        if (connected) {
-            connected = false
-            listener.onDisconnected()
+    /**
+     * wsAccumulator에서 완전한 WS 프레임 하나의 payload를 추출.
+     * 없으면 소켓에서 더 읽어와서 재시도.
+     */
+    private suspend fun readNextWsFrame(): ByteArray? {
+        while (true) {
+            val payload = extractWsFrame()
+            if (payload != null) return payload
+            // 더 읽기
+            val chunk = sslRead() ?: return null
+            wsAccumulator.write(chunk)
         }
     }
 
+    /**
+     * wsAccumulator에서 완전한 WS 프레임 payload 추출. 부족하면 null.
+     * 제어 프레임(ping/close)은 처리 후 null 반환.
+     */
+    private suspend fun extractWsFrame(): ByteArray? {
+        val buf = wsAccumulator.toByteArray()
+        if (buf.size < 2) return null
+
+        val opcode = buf[0].toInt() and 0x0F
+        val masked = (buf[1].toInt() and 0x80) != 0
+        var payloadLen = (buf[1].toInt() and 0x7F).toLong()
+        var offset = 2
+
+        when {
+            payloadLen == 126L -> {
+                if (buf.size < 4) return null
+                payloadLen = ((buf[2].toInt() and 0xFF shl 8) or (buf[3].toInt() and 0xFF)).toLong()
+                offset = 4
+            }
+            payloadLen == 127L -> {
+                if (buf.size < 10) return null
+                payloadLen = 0
+                for (i in 2..9) payloadLen = (payloadLen shl 8) or (buf[i].toInt() and 0xFF).toLong()
+                offset = 10
+            }
+        }
+        if (masked) offset += 4
+        val totalLen = offset + payloadLen.toInt()
+        if (buf.size < totalLen) return null
+
+        // accumulator 에서 이 프레임 제거
+        wsAccumulator.reset()
+        if (buf.size > totalLen) wsAccumulator.write(buf, totalLen, buf.size - totalLen)
+
+        val payload = if (masked) {
+            val key = buf.copyOfRange(offset - 4, offset)
+            ByteArray(payloadLen.toInt()) { (buf[offset + it].toInt() xor key[it % 4].toInt()).toByte() }
+        } else {
+            buf.copyOfRange(offset, offset + payloadLen.toInt())
+        }
+
+        val fin = (buf[0].toInt() and 0x80) != 0
+
+        // 제어 프레임 처리
+        return when (opcode) {
+            0x08 -> { Log.d(TAG, "WS close frame"); null }  // close
+            0x09 -> { sendWsPong(payload); null }            // ping → pong
+            0x0A -> null                                      // pong
+            0x00 -> {
+                // continuation frame: 조각 누산
+                wsFragmentBuffer.write(payload)
+                if (fin) {
+                    val complete = wsFragmentBuffer.toByteArray()
+                    wsFragmentBuffer.reset()
+                    complete
+                } else null
+            }
+            else -> {
+                if (fin) {
+                    // 단일 완전 프레임
+                    payload
+                } else {
+                    // 첫 번째 조각: 버퍼 시작
+                    wsFragmentBuffer.reset()
+                    wsFragmentBuffer.write(payload)
+                    null
+                }
+            }
+        }
+    }
+
+    // ── 전송 루프 ──
+
     private suspend fun startSendLoop() {
-        Log.d(TAG, "Send loop started")
         try {
-            for (frameData in sendChannel) {
+            for (wsFrame in sendChannel) {
                 if (!connected) break
-                doSend(frameData)
+                sslSend(wsFrame)
             }
         } catch (e: CancellationException) {
             Log.d(TAG, "Send loop cancelled")
@@ -334,124 +391,106 @@ class BinarySocketClient(
         }
     }
 
+    // ── Keep-alive ──
+
     private suspend fun startKeepAlive() {
-        Log.d(TAG, "KeepAlive started (${KEEPALIVE_INTERVAL_MS}ms)")
         try {
             while (connected && clientScope?.isActive == true) {
                 delay(KEEPALIVE_INTERVAL_MS)
                 if (connected) {
-                    val noopBody = noopBodyProvider?.invoke() ?: ByteArray(0)
-                    Log.d(TAG, "KeepAlive sending NOOP frame (bodySize=${noopBody.size})")
-                    sendFrame(ProtocolCommand.NOOP.code, noopBody)
+                    val body = noopBodyProvider?.invoke() ?: ByteArray(0)
+                    Log.d(TAG, "KeepAlive NOOP 전송 (bodySize=${body.size})")
+                    sendFrame(ProtocolCommand.NOOP.code, body)
                 }
             }
-        } catch (_: CancellationException) {
-            Log.d(TAG, "KeepAlive cancelled")
-        }
+        } catch (_: CancellationException) {}
     }
 
-    // ── 실제 전송 (SSL wrap → channel write, SEED 암호화 없음) ──
+    // ── WebSocket 프레임 래핑 (클라이언트→서버, 마스킹 필수) ──
 
-    private suspend fun doSend(frameData: ByteArray) {
+    private fun wrapWsFrame(payload: ByteArray, opcode: Int): ByteArray {
+        val mask = ByteArray(4).also { SecureRandom().nextBytes(it) }
+        val masked = ByteArray(payload.size) { (payload[it].toInt() xor mask[it % 4].toInt()).toByte() }
+        val out = ByteArrayOutputStream(6 + payload.size)
+
+        out.write(0x80 or opcode) // FIN=1
+        when {
+            payload.size < 126 -> { out.write(0x80 or payload.size) }
+            payload.size < 65536 -> {
+                out.write(0x80 or 126)
+                out.write(payload.size shr 8); out.write(payload.size and 0xFF)
+            }
+            else -> {
+                out.write(0x80 or 127)
+                for (i in 7 downTo 0) out.write((payload.size shr (i * 8)) and 0xFF)
+            }
+        }
+        out.write(mask)
+        out.write(masked)
+        return out.toByteArray()
+    }
+
+    private suspend fun sendWsPong(payload: ByteArray) {
+        val frame = wrapWsFrame(payload, opcode = 0x0A)
+        sslSend(frame)
+    }
+
+    // ── SSL 송수신 헬퍼 ──
+
+    private suspend fun sslRead(): ByteArray? {
+        val bytesRead = readFromChannelAsync()
+        if (bytesRead < 0) return null
+        if (bytesRead == 0) return ByteArray(0)
+
+        val out = ByteArrayOutputStream()
+        peerNetData.flip()
+        while (peerNetData.hasRemaining()) {
+            peerAppData.clear()
+            val result = sslEngine.unwrap(peerNetData, peerAppData)
+            if (result.status == SSLEngineResult.Status.BUFFER_UNDERFLOW) break
+            if (result.status != SSLEngineResult.Status.OK) break
+            peerAppData.flip()
+            if (peerAppData.hasRemaining()) {
+                val bytes = ByteArray(peerAppData.remaining())
+                peerAppData.get(bytes)
+                out.write(bytes)
+            }
+        }
+        peerNetData.compact()
+        return out.toByteArray()
+    }
+
+    private suspend fun sslSend(data: ByteArray) {
         sslWrapMutex.withLock {
-            try {
-                val sendBuffer = ByteBuffer.wrap(frameData)
-                Log.d(TAG, "doSend: ${frameData.size} bytes")
-
-                while (sendBuffer.hasRemaining()) {
-                    myNetData.clear()
-                    val result = sslEngine.wrap(sendBuffer, myNetData)
-
-                    if (result.status == SSLEngineResult.Status.BUFFER_OVERFLOW) {
-                        val newSize = sslEngine.session.packetBufferSize
-                        if (myNetData.capacity() < newSize) {
-                            myNetData = ByteBuffer.allocate(newSize)
-                            continue
-                        }
-                    }
-
-                    if (result.status != SSLEngineResult.Status.OK
-                        && result.status != SSLEngineResult.Status.BUFFER_OVERFLOW
-                    ) {
-                        throw SSLException("SSL wrap failed: ${result.status}")
-                    }
-
-                    myNetData.flip()
-                    writeToChannelBlocking(myNetData)
+            val sendBuffer = ByteBuffer.wrap(data)
+            while (sendBuffer.hasRemaining()) {
+                myNetData.clear()
+                val result = sslEngine.wrap(sendBuffer, myNetData)
+                if (result.status != SSLEngineResult.Status.OK
+                    && result.status != SSLEngineResult.Status.BUFFER_OVERFLOW) {
+                    throw SSLException("SSL wrap failed: ${result.status}")
                 }
-            } catch (e: Exception) {
-                Log.e(TAG, "doSend failed: ${e.message}")
-                throw e
+                myNetData.flip()
+                writeToChannelBlocking(myNetData)
             }
         }
     }
 
-    // ── 수신 데이터 처리 (길이 기반 바이너리 프레임 조립) ──
+    // ── NIO I/O ──
 
-    private fun processReceivedBinaryData(buffer: ByteBuffer) {
-        val remaining = buffer.remaining()
-        if (remaining == 0) return
+    private fun readFromChannelBlocking(): Int =
+        socketChannel!!.read(peerNetData).get(READ_TIMEOUT_SEC, TimeUnit.SECONDS)
 
-        // accumulator에 데이터 추가
-        val bytes = ByteArray(remaining)
-        buffer.get(bytes)
-        accumulator.write(bytes)
-
-        // 완전한 프레임 추출
-        extractFrames()
-    }
-
-    private fun extractFrames() {
-        while (true) {
-            val data = accumulator.toByteArray()
-            if (data.size < BinaryFrameCodec.HEADER_SIZE) break
-
-            val bodyLength = BinaryFrameCodec.readUint24(data, 2)
-            val totalSize = BinaryFrameCodec.HEADER_SIZE + bodyLength
-
-            if (data.size < totalSize) break // 아직 불완전한 프레임
-
-            // 완전한 프레임 추출
-            val frameBytes = data.copyOfRange(0, totalSize)
-            val frame = BinaryFrameCodec.decode(frameBytes)
-
-            Log.d(TAG, "Frame received: $frame")
-            listener.onFrameReceived(frame)
-
-            // accumulator에서 처리된 프레임 제거
-            accumulator.reset()
-            if (data.size > totalSize) {
-                accumulator.write(data, totalSize, data.size - totalSize)
-            }
-        }
-    }
-
-    // ── NIO 채널 I/O ──
-
-    private fun readFromChannelBlocking(): Int {
-        return socketChannel!!.read(peerNetData).get(READ_TIMEOUT_SEC, TimeUnit.SECONDS)
-    }
-
-    private suspend fun readFromChannelAsync(): Int {
-        return suspendCancellableCoroutine { cont ->
-            socketChannel!!.read(
-                peerNetData, READ_TIMEOUT_SEC, TimeUnit.SECONDS, null,
+    private suspend fun readFromChannelAsync(): Int =
+        suspendCancellableCoroutine { cont ->
+            socketChannel!!.read(peerNetData, READ_TIMEOUT_SEC, TimeUnit.SECONDS, null,
                 object : CompletionHandler<Int, Void?> {
-                    override fun completed(result: Int, attachment: Void?) {
-                        cont.resume(result)
-                    }
-
-                    override fun failed(exc: Throwable, attachment: Void?) {
-                        cont.resumeWithException(exc)
-                    }
-                }
-            )
+                    override fun completed(r: Int, a: Void?) = cont.resume(r)
+                    override fun failed(e: Throwable, a: Void?) = cont.resumeWithException(e)
+                })
         }
-    }
 
     private fun writeToChannelBlocking(buffer: ByteBuffer) {
-        while (buffer.hasRemaining()) {
-            socketChannel!!.write(buffer).get()
-        }
+        while (buffer.hasRemaining()) socketChannel!!.write(buffer).get()
     }
 }

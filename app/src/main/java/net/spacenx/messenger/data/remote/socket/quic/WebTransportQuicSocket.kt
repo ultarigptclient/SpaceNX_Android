@@ -296,6 +296,11 @@ class WebTransportQuicSocket(
     var writer = bidi.writable.getWriter();
     var reader = bidi.readable.getReader();
 
+    var whoAu = await reader.read();
+    if (whoAu.done) { ns.onError('stream closed before WhoAU?'); return; }
+    var greeting = new TextDecoder().decode(whoAu.value);
+    if (greeting.indexOf('WhoAU?') < 0) { ns.onError('unexpected greeting: ' + greeting); return; }
+
     window._neoWtAlive = true;
     window._neoWt = {
       send: function(b64) {

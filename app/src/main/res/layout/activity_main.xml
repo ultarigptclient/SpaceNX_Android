@@ -23,4 +23,17 @@
         android:layout_height="wrap_content"
         android:visibility="gone" />
 
+    <!-- 개발자용 파일로그 설정 버튼 (우측 세로중앙) -->
+    <ImageButton
+        android:id="@+id/btnDevLog"
+        android:layout_width="32dp"
+        android:layout_height="32dp"
+        android:layout_gravity="center_vertical|end"
+        android:layout_marginEnd="4dp"
+        android:src="@android:drawable/ic_menu_manage"
+        android:background="@android:color/transparent"
+        android:alpha="0.4"
+        android:contentDescription="파일 로그 설정"
+        android:visibility="gone" />
+
 </FrameLayout>

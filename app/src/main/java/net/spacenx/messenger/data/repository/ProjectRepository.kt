@@ -3,12 +3,15 @@ package net.spacenx.messenger.data.repository
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import net.spacenx.messenger.util.FileLogger
 import net.spacenx.messenger.common.AppConfig
 import net.spacenx.messenger.common.JsonStreamUtil
 import net.spacenx.messenger.common.parseStream
 import kotlinx.coroutines.withTimeoutOrNull
+import net.spacenx.messenger.data.local.ChatDatabase
 import net.spacenx.messenger.data.local.DatabaseProvider
 import net.spacenx.messenger.data.local.entity.*
+import java.util.Calendar as JavaCalendar
 import net.spacenx.messenger.data.remote.api.ApiClient
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -42,6 +45,7 @@ class ProjectRepository(
             while (true) {
                 val lastOffset = db.syncMetaDao().getValue("projectEventOffset") ?: 0L
                 Log.d(TAG, "syncProject: offset=$lastOffset")
+                if (lastOffset == 0L) FileLogger.log(TAG, "syncProject REQ offset=$lastOffset")
 
                 val body = JSONObject().apply {
                     put("userId", userId)
@@ -65,9 +69,11 @@ class ProjectRepository(
             }
 
             Log.d(TAG, "syncProject complete: $totalFetched events")
+            FileLogger.log(TAG, "syncProject DONE totalEvents=$totalFetched")
             true
         } catch (e: Exception) {
             Log.e(TAG, "syncProject error: ${e.message}", e)
+            FileLogger.log(TAG, "syncProject ERROR ${e.message}")
             false
         }
     }
@@ -164,6 +170,7 @@ class ProjectRepository(
 
             while (true) {
                 val lastOffset = db.syncMetaDao().getValue("issueEventOffset") ?: 0L
+                Log.d(TAG, "syncIssue: offset=$lastOffset")
                 val body = JSONObject().apply {
                     put("userId", userId)
                     put("issueEventOffset", lastOffset)
@@ -185,9 +192,11 @@ class ProjectRepository(
             }
 
             Log.d(TAG, "syncIssue complete: $totalFetched events")
+            FileLogger.log(TAG, "syncIssue DONE totalEvents=$totalFetched")
             true
         } catch (e: Exception) {
             Log.e(TAG, "syncIssue error: ${e.message}", e)
+            FileLogger.log(TAG, "syncIssue ERROR ${e.message}")
             false
         }
     }
@@ -231,6 +240,163 @@ class ProjectRepository(
     }
 
     // ══════════════════════════════════════
+    // syncCalendar — 달력 delta sync
+    // ══════════════════════════════════════
+
+    suspend fun syncCalendar(): Boolean = withContext(Dispatchers.IO) {
+        try {
+            val db = dbProvider.getProjectDatabase()
+            val userId = appConfig.getSavedUserId() ?: return@withContext false
+            val token = awaitToken() ?: return@withContext false
+            var totalFetched = 0
+
+            // offset > 0이지만 테이블이 비어있으면 DB 마이그레이션 직후 데이터 유실 상황 → 전체 재동기화
+            val existingOffset = db.syncMetaDao().getValue("calEventOffset") ?: 0L
+            if (existingOffset > 0L && db.calEventDao().getByUser(userId).isEmpty()) {
+                db.syncMetaDao().insert(ProjectSyncMetaEntity("calEventOffset", 0L))
+                Log.d(TAG, "syncCalendar: cal_events empty despite offset=$existingOffset, resetting for full re-sync")
+            }
+
+            while (true) {
+                val lastOffset = db.syncMetaDao().getValue("calEventOffset") ?: 0L
+                Log.d(TAG, "syncCalendar: offset=$lastOffset")
+
+                val body = JSONObject().apply {
+                    put("userId", userId)
+                    put("calEventOffset", lastOffset)
+                    put("reset", lastOffset == 0L)
+                    put("limit", SYNC_PAGE_SIZE)
+                }
+                val result = ApiClient.postJson(appConfig.getEndpointByPath("/comm/synccalendar"), body, token)
+                if (result.optInt("errorCode", -1) != 0) break
+
+                val events = result.optJSONArray("events") ?: JSONArray()
+                if (events.length() > 0) {
+                    totalFetched += events.length()
+                    processCalEvents(db, userId, events)
+                    val lastEventId = result.optLong("lastEventId", 0L)
+                    if (lastEventId > 0) db.syncMetaDao().insert(ProjectSyncMetaEntity("calEventOffset", lastEventId))
+                }
+
+                if (!result.optBoolean("hasMore", false) || events.length() == 0) break
+            }
+
+            Log.d(TAG, "syncCalendar complete: $totalFetched events")
+            FileLogger.log(TAG, "syncCalendar DONE totalEvents=$totalFetched")
+            true
+        } catch (e: Exception) {
+            Log.e(TAG, "syncCalendar error: ${e.message}", e)
+            FileLogger.log(TAG, "syncCalendar ERROR ${e.message}")
+            false
+        }
+    }
+
+    private suspend fun processCalEvents(db: net.spacenx.messenger.data.local.ProjectDatabase, userId: String, events: JSONArray) {
+        for (i in 0 until events.length()) {
+            val event = events.getJSONObject(i)
+            val eventType = event.optString("eventType", "")
+            // 서버 응답 키: "event" (초기 sync) 또는 calCode만 있는 delta
+            val calObj = event.optJSONObject("event") ?: JSONObject()
+            val calCode = calObj.optString("calCode", event.optString("calCode", ""))
+
+            when (eventType) {
+                "CREATE_CAL", "MOD_CAL" -> {
+                    if (calCode.isNotEmpty()) {
+                        db.calEventDao().insertAll(listOf(calObjToEntity(calObj, calCode, userId)))
+                    }
+                }
+                "DEL_CAL" -> {
+                    if (calCode.isNotEmpty()) db.calEventDao().delete(calCode)
+                }
+            }
+        }
+    }
+
+    // ══════════════════════════════════════
+    // syncTodo — Todo delta sync (projectCode=null 이슈)
+    // ══════════════════════════════════════
+
+    suspend fun syncTodo(): Boolean = withContext(Dispatchers.IO) {
+        try {
+            val db = dbProvider.getProjectDatabase()
+            val userId = appConfig.getSavedUserId() ?: return@withContext false
+            val token = awaitToken() ?: return@withContext false
+            var totalFetched = 0
+
+            while (true) {
+                val lastOffset = db.syncMetaDao().getValue("todoEventOffset") ?: 0L
+                Log.d(TAG, "syncTodo: offset=$lastOffset")
+
+                val body = JSONObject().apply {
+                    put("userId", userId)
+                    put("todoEventOffset", lastOffset)
+                    put("reset", lastOffset == 0L)
+                    put("limit", SYNC_PAGE_SIZE)
+                }
+                val result = ApiClient.postJson(appConfig.getEndpointByPath("/comm/synctodo"), body, token)
+                if (result.optInt("errorCode", -1) != 0) break
+
+                val events = result.optJSONArray("events") ?: JSONArray()
+                if (events.length() > 0) {
+                    totalFetched += events.length()
+                    processTodoEvents(db, events)
+                    val lastEventId = result.optLong("lastEventId", 0L)
+                    if (lastEventId > 0) db.syncMetaDao().insert(ProjectSyncMetaEntity("todoEventOffset", lastEventId))
+                }
+
+                if (!result.optBoolean("hasMore", false) || events.length() == 0) break
+            }
+
+            Log.d(TAG, "syncTodo complete: $totalFetched events")
+            FileLogger.log(TAG, "syncTodo DONE totalEvents=$totalFetched")
+            true
+        } catch (e: Exception) {
+            Log.e(TAG, "syncTodo error: ${e.message}", e)
+            FileLogger.log(TAG, "syncTodo ERROR ${e.message}")
+            false
+        }
+    }
+
+    private suspend fun processTodoEvents(db: net.spacenx.messenger.data.local.ProjectDatabase, events: JSONArray) {
+        for (i in 0 until events.length()) {
+            val event = events.getJSONObject(i)
+            val eventType = event.optString("eventType", "")
+            // 서버 응답 키: "todo" (synctodo 전용)
+            val todo = event.optJSONObject("todo") ?: JSONObject()
+            val issueCode = todo.optString("issueCode", event.optString("issueCode", ""))
+
+            when (eventType) {
+                "CREATE_TODO", "MOD_TODO" -> {
+                    if (issueCode.isNotEmpty() && todo.length() > 0) {
+                        db.issueDao().insertAll(listOf(IssueEntity(
+                            issueCode = issueCode,
+                            projectCode = "",   // Todo: projectCode 항상 빈 문자열
+                            channelCode = todo.optString("channelCode", ""),
+                            title = todo.optString("title", ""),
+                            description = todo.optString("description", ""),
+                            issueType = todo.optString("issueType", "TASK"),
+                            issueStatus = todo.optString("issueStatus", "TODO"),
+                            priority = todo.optString("priority", "NORMAL"),
+                            assigneeUserId = todo.optString("assigneeUserId", ""),
+                            reporterUserId = todo.optString("reporterUserId", ""),
+                            labels = todo.optString("labels", ""),
+                            dueDate = todo.optLong("dueDate", 0L),
+                            completedDate = todo.optLong("completedDate", 0L),
+                            modDate = todo.optLong("modDate", 0L),
+                            createdDate = todo.optLong("createdDate", 0L),
+                            threadCode = todo.optString("threadCode", ""),
+                            commentCount = todo.optInt("commentCount", 0)
+                        )))
+                    }
+                }
+                "DEL_TODO" -> {
+                    if (issueCode.isNotEmpty()) db.issueDao().delete(issueCode)
+                }
+            }
+        }
+    }
+
+    // ══════════════════════════════════════
     // syncThread — 스레드 delta sync
     // ══════════════════════════════════════
 
@@ -239,11 +405,19 @@ class ProjectRepository(
             val db = dbProvider.getProjectDatabase()
             val userId = appConfig.getSavedUserId() ?: return@withContext false
             val token = awaitToken() ?: return@withContext false
+
+            // chatContents 마이그레이션: 최초 1회 threadEventOffset 리셋 → 서버에서 전체 재fetch
+            if (db.syncMetaDao().getValue("threadContentsMigrated") == null) {
+                db.syncMetaDao().insert(ProjectSyncMetaEntity("threadEventOffset", 0L))
+                db.syncMetaDao().insert(ProjectSyncMetaEntity("threadContentsMigrated", 1L))
+            }
+
             var totalFetched = 0
             var pageCount = 0
 
             while (true) {
                 val lastOffset = db.syncMetaDao().getValue("threadEventOffset") ?: 0L
+                Log.d(TAG, "syncThread: offset=$lastOffset")
                 val body = JSONObject().apply {
                     put("userId", userId)
                     put("threadEventOffset", lastOffset)
@@ -299,9 +473,11 @@ class ProjectRepository(
             }
 
             Log.d(TAG, "syncThread complete: $totalFetched events")
+            FileLogger.log(TAG, "syncThread DONE totalEvents=$totalFetched pages=$pageCount")
             true
         } catch (e: Exception) {
             Log.e(TAG, "syncThread error: ${e.message}", e)
+            FileLogger.log(TAG, "syncThread ERROR ${e.message}")
             false
         }
     }
@@ -322,7 +498,8 @@ class ProjectRepository(
                             threadCode = threadCode,
                             channelCode = channelCode,
                             commentCount = event.optInt("commentCount", 0),
-                            createdDate = event.optLong("createdDate", 0L)
+                            createdDate = event.optLong("createdDate", 0L),
+                            chatContents = event.optString("chatContents", "")
                         )))
                     }
                 }
@@ -348,7 +525,12 @@ class ProjectRepository(
                     if (commentCount != null && threadCode.isNotEmpty()) {
                         val ct = db.chatThreadDao().getByThreadCode(threadCode)
                         if (ct != null) {
-                            db.chatThreadDao().insertChatThreads(listOf(ct.copy(commentCount = commentCount)))
+                            val newContents = event.optString("chatContents", "")
+                            val merged = ct.copy(
+                                commentCount = commentCount,
+                                chatContents = if (newContents.isNotEmpty()) newContents else ct.chatContents
+                            )
+                            db.chatThreadDao().insertChatThreads(listOf(merged))
                         }
                     }
                 }
@@ -394,6 +576,39 @@ class ProjectRepository(
                     if (issues.isEmpty()) return@withContext null
                     JSONObject().put("errorCode", 0).put("issues", issuesToJsonArray(issues))
                 }
+                "/comm/gettodos" -> {
+                    val todos = db.issueDao().getAllTodos()
+                    if (todos.isEmpty()) return@withContext null
+                    JSONObject().put("errorCode", 0).put("todos", issuesToJsonArray(todos))
+                }
+                "/comm/getcalevents" -> {
+                    // 서버 계약: { userId, eventDate: "YYYY-MM-DD" } → 해당 날짜 일정만 반환
+                    val eventDate = body.optString("eventDate", "")
+                    val all = db.calEventDao().getByUser(userId)
+                    val events = if (eventDate.isNotEmpty()) {
+                        val fmt = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.getDefault())
+                        all.filter { it.startDate > 0 && fmt.format(java.util.Date(it.startDate)) == eventDate }
+                    } else all
+                    if (events.isEmpty()) return@withContext null
+                    JSONObject().put("errorCode", 0).put("events", calEventsToJsonArray(events))
+                }
+                "/comm/getcaleventsbymouth" -> {
+                    // 서버 계약: { userId, year, month(1-12) } — 로컬도 동일 파라미터로 맞춤
+                    val year = body.optInt("year", 0)
+                    val month = body.optInt("month", 0)
+                    val events = if (year > 0 && month in 1..12) {
+                        val cal = java.util.Calendar.getInstance()
+                        cal.clear(); cal.set(year, month - 1, 1, 0, 0, 0)
+                        val fromMs = cal.timeInMillis
+                        cal.add(java.util.Calendar.MONTH, 1)
+                        val toMs = cal.timeInMillis
+                        db.calEventDao().getByUserAndMonth(userId, fromMs, toMs)
+                    } else {
+                        db.calEventDao().getByUser(userId)
+                    }
+                    if (events.isEmpty()) return@withContext null
+                    JSONObject().put("errorCode", 0).put("events", calEventsToJsonArray(events))
+                }
                 "/comm/getmyissues" -> {
                     val issues = db.issueDao().getByAssignee(userId)
                     if (issues.isEmpty()) return@withContext null
@@ -406,7 +621,8 @@ class ProjectRepository(
                 "/comm/getchatthreads" -> {
                     val threads = db.chatThreadDao().getByChannel(body.optString("channelCode", ""))
                     if (threads.isEmpty()) return@withContext null
-                    JSONObject().put("errorCode", 0).put("threads", threadsToJsonArray(threads))
+                    val chatDb = dbProvider.getChatDatabase()
+                    JSONObject().put("errorCode", 0).put("threads", threadsToJsonArray(threads, chatDb))
                 }
                 "/comm/getchatthread" -> {
                     val ct = db.chatThreadDao().getByChatCode(body.optString("chatCode", "")) ?: return@withContext null
@@ -449,6 +665,43 @@ class ProjectRepository(
             val db = dbProvider.getProjectDatabase()
 
             when (path) {
+                "/comm/getcalevents", "/comm/getcaleventsbymouth" -> {
+                    val events = result.optJSONArray("events") ?: return@withContext
+                    Log.d(TAG, "cacheAfterCud: caching ${events.length()} cal events from REST fallback ($path)")
+                    val savedUserId = body.optString("userId", appConfig.getSavedUserId() ?: "")
+                    val list = (0 until events.length()).map { i ->
+                        val e = events.getJSONObject(i)
+                        calObjToEntity(e, e.optString("calCode", ""), savedUserId)
+                    }.filter { it.calCode.isNotEmpty() }
+                    if (list.isNotEmpty()) db.calEventDao().insertAll(list)
+                }
+                "/comm/gettodos" -> {
+                    val todos = result.optJSONArray("todos") ?: return@withContext
+                    Log.d(TAG, "cacheAfterCud: caching ${todos.length()} todos from REST fallback")
+                    val list = (0 until todos.length()).map { i ->
+                        val t = todos.getJSONObject(i)
+                        IssueEntity(
+                            issueCode = t.optString("issueCode", ""),
+                            projectCode = "",
+                            channelCode = t.optString("channelCode", ""),
+                            title = t.optString("title", ""),
+                            description = t.optString("description", ""),
+                            issueType = t.optString("issueType", "TASK"),
+                            issueStatus = t.optString("issueStatus", "TODO"),
+                            priority = t.optString("priority", "NORMAL"),
+                            assigneeUserId = t.optString("assigneeUserId", ""),
+                            reporterUserId = t.optString("reporterUserId", ""),
+                            labels = t.optString("labels", ""),
+                            dueDate = t.optLong("dueDate", 0L),
+                            completedDate = t.optLong("completedDate", 0L),
+                            modDate = t.optLong("modDate", 0L),
+                            createdDate = t.optLong("createdDate", 0L),
+                            threadCode = t.optString("threadCode", ""),
+                            commentCount = t.optInt("commentCount", 0)
+                        )
+                    }.filter { it.issueCode.isNotEmpty() }
+                    if (list.isNotEmpty()) db.issueDao().insertAll(list)
+                }
                 "/comm/addthreadcomment" -> {
                     val commentId = result.optInt("commentId", 0)
                     val threadCode = body.optString("threadCode", "")
@@ -526,6 +779,55 @@ class ProjectRepository(
                         db.issueDao().delete(issueCode)
                     }
                 }
+
+                "/comm/createcalevent", "/comm/updatecalevent" -> {
+                    val src = result.optJSONObject("calEvent") ?: result
+                    val calCode = src.optString("calCode", body.optString("calCode", ""))
+                    if (calCode.isNotEmpty()) {
+                        val savedUserId = appConfig.getSavedUserId() ?: ""
+                        val merged = JSONObject().apply {
+                            // body 먼저 채우고 src로 덮어쓰기 (서버 응답 우선)
+                            body.keys().forEach { k -> put(k, body.get(k)) }
+                            src.keys().forEach { k -> put(k, src.get(k)) }
+                            if (!has("userId") || optString("userId").isEmpty()) put("userId", savedUserId)
+                        }
+                        db.calEventDao().insertAll(listOf(calObjToEntity(merged, calCode, savedUserId)))
+                    }
+                }
+                "/comm/deletecalevent" -> {
+                    val calCode = body.optString("calCode", result.optString("calCode", ""))
+                    if (calCode.isNotEmpty()) db.calEventDao().delete(calCode)
+                }
+
+                "/comm/createtodo", "/comm/updatetodo" -> {
+                    val src = result.optJSONObject("issue") ?: result
+                    val issueCode = src.optString("issueCode", body.optString("issueCode", ""))
+                    if (issueCode.isNotEmpty()) {
+                        db.issueDao().insertAll(listOf(IssueEntity(
+                            issueCode = issueCode,
+                            projectCode = "",   // Todo는 항상 projectCode 없음
+                            channelCode = src.optString("channelCode", body.optString("channelCode", "")),
+                            title = src.optString("title", body.optString("title", "")),
+                            description = src.optString("description", body.optString("description", "")),
+                            issueType = src.optString("issueType", body.optString("issueType", "TASK")),
+                            issueStatus = src.optString("issueStatus", body.optString("issueStatus", "TODO")),
+                            priority = src.optString("priority", body.optString("priority", "NORMAL")),
+                            assigneeUserId = src.optString("assigneeUserId", body.optString("assigneeUserId", "")),
+                            reporterUserId = src.optString("reporterUserId", body.optString("reporterUserId", "")),
+                            labels = src.optString("labels", body.optString("labels", "")),
+                            dueDate = src.optLong("dueDate", body.optLong("dueDate", 0L)),
+                            completedDate = src.optLong("completedDate", 0L),
+                            modDate = src.optLong("modDate", System.currentTimeMillis()),
+                            createdDate = src.optLong("createdDate", System.currentTimeMillis()),
+                            threadCode = src.optString("threadCode", ""),
+                            commentCount = src.optInt("commentCount", 0)
+                        )))
+                    }
+                }
+                "/comm/deletetodo" -> {
+                    val issueCode = body.optString("issueCode", result.optString("issueCode", ""))
+                    if (issueCode.isNotEmpty()) db.issueDao().delete(issueCode)
+                }
             }
         } catch (e: Exception) {
             Log.e(TAG, "cacheAfterCud error: $path → ${e.message}")
@@ -550,6 +852,8 @@ class ProjectRepository(
             path in listOf("/comm/createissue", "/comm/updateissue", "/comm/deleteissue") -> "issue"
             path in listOf("/comm/createchatthread", "/comm/createissuethread", "/comm/deletechatthread",
                 "/comm/addthreadcomment", "/comm/deletethreadcomment") -> "thread"
+            path in listOf("/comm/createcalevent", "/comm/updatecalevent", "/comm/deletecalevent") -> "calendar"
+            path in listOf("/comm/createtodo", "/comm/updatetodo", "/comm/deletetodo") -> "todo"
             else -> null
         }
     }
@@ -576,8 +880,12 @@ class ProjectRepository(
             val db = dbProvider.getProjectDatabase()
             val chatThreads = db.chatThreadDao().getAllChatThreads(limit, offset)
             val issueThreads = db.chatThreadDao().getAllIssueThreads(limit, offset)
+            val chatDb = dbProvider.getChatDatabase()
             val events = JSONArray()
             chatThreads.forEach { t ->
+                val contents = t.chatContents.ifEmpty {
+                    chatDb.chatDao().getByChatCode(t.chatCode)?.contents ?: ""
+                }
                 events.put(JSONObject().apply {
                     put("eventType", "CREATE_CHAT_THREAD")
                     put("threadCode", t.threadCode)
@@ -585,6 +893,7 @@ class ProjectRepository(
                     put("channelCode", t.channelCode)
                     put("commentCount", t.commentCount)
                     if (t.createdDate > 0) put("createdDate", t.createdDate)
+                    if (contents.isNotEmpty()) put("chatContents", contents)
                 })
             }
             issueThreads.forEach { t ->
@@ -606,8 +915,9 @@ class ProjectRepository(
     suspend fun getThreadsByChannel(channelCode: String): JSONObject = withContext(Dispatchers.IO) {
         try {
             val db = dbProvider.getProjectDatabase()
+            val chatDb = dbProvider.getChatDatabase()
             val threads = db.chatThreadDao().getByChannel(channelCode)
-            JSONObject().put("errorCode", 0).put("threads", threadsToJsonArray(threads))
+            JSONObject().put("errorCode", 0).put("threads", threadsToJsonArray(threads, chatDb))
         } catch (e: Exception) {
             Log.e(TAG, "getThreadsByChannel error: ${e.message}")
             JSONObject().put("errorCode", -1).put("errorMessage", e.message)
@@ -688,18 +998,85 @@ class ProjectRepository(
         return JSONArray().apply { issues.forEach { put(issueToJson(it)) } }
     }
 
-    private fun threadsToJsonArray(threads: List<ChatThreadEntity>): JSONArray {
+    private suspend fun threadsToJsonArray(threads: List<ChatThreadEntity>, chatDb: ChatDatabase): JSONArray {
         return JSONArray().apply {
             threads.forEach { t ->
+                val contents = t.chatContents.ifEmpty {
+                    chatDb.chatDao().getByChatCode(t.chatCode)?.contents ?: ""
+                }
                 put(JSONObject().apply {
                     put("threadCode", t.threadCode)
                     put("chatCode", t.chatCode)
                     put("channelCode", t.channelCode)
                     put("commentCount", t.commentCount)
                     if (t.createdDate > 0) put("createdDate", t.createdDate)
+                    if (contents.isNotEmpty()) put("chatContents", contents)
                 })
             }
         }
+    }
+
+    private fun parseDateTimeMs(dateStr: String, timeStr: String): Long {
+        if (dateStr.isEmpty()) return 0L
+        return try {
+            val fullTime = if (timeStr.isEmpty()) "00:00" else timeStr
+            val sdf = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm", java.util.Locale.getDefault())
+            sdf.parse("$dateStr $fullTime")?.time ?: 0L
+        } catch (_: Exception) { 0L }
+    }
+
+    private fun calObjToEntity(obj: JSONObject, calCode: String, fallbackUserId: String): CalEventEntity {
+        var startDate = obj.optLong("startDate", 0L)
+        var endDate = obj.optLong("endDate", 0L)
+        // 서버가 eventDate/startTime/endTime 문자열로 보내는 경우 변환
+        if (startDate == 0L) {
+            val eventDate = obj.optString("eventDate", "")
+            startDate = parseDateTimeMs(eventDate, obj.optString("startTime", ""))
+            if (endDate == 0L && startDate > 0L) {
+                endDate = parseDateTimeMs(eventDate, obj.optString("endTime", ""))
+                if (endDate == 0L || endDate <= startDate) endDate = startDate + 3_600_000L
+            }
+        }
+        return CalEventEntity(
+            calCode = calCode,
+            userId = obj.optString("userId", fallbackUserId).ifEmpty { fallbackUserId },
+            title = obj.optString("title", ""),
+            description = obj.optString("description", ""),
+            calType = obj.optString("calType", "PERSONAL"),
+            startDate = startDate,
+            endDate = endDate,
+            allDay = obj.optInt("allDay", 0),
+            color = obj.optString("color", ""),
+            location = obj.optString("location", ""),
+            modDate = obj.optLong("modDate", 0L),
+            createdDate = obj.optLong("createdDate", 0L)
+        )
+    }
+
+    private fun calEventToJson(e: CalEventEntity): JSONObject {
+        // 서버 /comm/synccalendar·/comm/getcalevents·/comm/getcaleventsbymouth 응답과 동일 스키마로 직렬화.
+        // CalPage 는 ev.eventDate 문자열로 필터하므로 startDate(ms)만 내려주면 렌더링이 안 됨.
+        val dateFmt = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.getDefault())
+        val timeFmt = java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault())
+        val startMs = e.startDate
+        val endMs = if (e.endDate > 0) e.endDate else e.startDate
+        return JSONObject().apply {
+            put("calCode", e.calCode)
+            put("userId", e.userId)
+            put("title", e.title)
+            put("eventDate", if (startMs > 0) dateFmt.format(java.util.Date(startMs)) else "")
+            put("startTime", if (startMs > 0) timeFmt.format(java.util.Date(startMs)) else "")
+            put("endTime", if (endMs > 0) timeFmt.format(java.util.Date(endMs)) else "")
+            put("category", e.calType)
+            put("color", e.color)
+            put("location", e.location)
+            if (e.createdDate > 0) put("createdDate", e.createdDate)
+            if (e.modDate > 0) put("modDate", e.modDate)
+        }
+    }
+
+    private fun calEventsToJsonArray(events: List<CalEventEntity>): JSONArray {
+        return JSONArray().apply { events.forEach { put(calEventToJson(it)) } }
     }
 
     private fun commentsToJsonArray(comments: List<ThreadCommentEntity>): JSONArray {

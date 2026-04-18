@@ -399,19 +399,18 @@ class FileHandler(
             val uploadUrl = ctx.appConfig.getEndpointByPath("/media/file/upload")
             val token = ctx.loginViewModel.sessionManager.jwtToken
             val result = withContext(Dispatchers.IO) {
-                tempFile.inputStream().use { stream ->
-                    ApiClient.uploadFileStream(stream, fileName, mime, tempFile.length(), uploadUrl, token) { sent, total ->
-                        val pct = if (total > 0) (sent * 100 / total).toInt() else 0
-                        val progressJson = JSONObject()
-                            .put("event", "uploadProgress")
-                            .put("progress", pct)
-                            .put("fileName", fileName)
-                        ctx.evalJsMain("window.postMessage('${ctx.esc(progressJson.toString())}')")
-                    }
+                ApiClient.uploadFileStream(tempFile, fileName, mime, uploadUrl, token) { sent, total ->
+                    val pct = if (total > 0) (sent * 100 / total).toInt() else 0
+                    val progressJson = JSONObject()
+                        .put("event", "uploadProgress")
+                        .put("progress", pct)
+                        .put("fileName", fileName)
+                    ctx.evalJsMain("window.postMessage('${ctx.esc(progressJson.toString())}')")
                 }
             }
             val uploadedUrl = result.optString("url", result.optString("fileUrl", ""))
             val fileId = result.optString("fileId", "")
+            Log.d(TAG, "chatUpload result: file=$fileName, size=${tempFile.length()}, url='$uploadedUrl', fileId='$fileId', keys=${result.keys().asSequence().toList()}, raw=${result.toString().take(400)}")
             ctx.resolveToJs(cbId, JSONObject()
                 .put("errorCode", 0)
                 .put("fileName", fileName)

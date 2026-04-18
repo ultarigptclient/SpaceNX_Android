@@ -65,15 +65,26 @@ class ChannelActionHandler(
     private suspend fun handleCreateGroupChatRoom(params: Map<String, Any?>) {
         try {
             val userIds = ctx.paramList(params, "userIds")
+            val channelName = listOf("channelName", "channelTitle", "title", "name", "roomName")
+                .map { ctx.paramStr(params, it) }
+                .firstOrNull { it.isNotEmpty() } ?: ""
+            Log.d(TAG, "createGroupChatRoom: paramKeys=${params.keys}, resolvedChannelName='$channelName'")
             val myId = ctx.appConfig.getSavedUserId() ?: ""
             val result = withContext(Dispatchers.IO) {
                 val usersArr = JSONArray().apply { userIds.forEach { put(it) } }
-                val body = JSONObject().put("users", usersArr).put("sendUserId", myId).put("channelType", "GROUP")
+                val body = JSONObject()
+                    .put("users", usersArr)
+                    .put("sendUserId", myId)
+                    .put("channelType", "GROUP")
+                if (channelName.isNotEmpty()) body.put("channelName", channelName)
                 ApiClient.postJson(ctx.appConfig.getEndpointByPath("/comm/makechannel"), body)
             }
             val channelCode = result.optString("channelCode", "")
+            Log.d(TAG, "createGroupChatRoom: server response channelCode=$channelCode, serverChannelName='${result.optString("channelName", "")}'")
             if (channelCode.isNotEmpty()) {
-                withContext(Dispatchers.IO) { ctx.saveChannelLocally(channelCode, userIds, "GROUP") }
+                val resolvedName = result.optString("channelName", "").ifEmpty { channelName }
+                Log.d(TAG, "createGroupChatRoom: saving locally channelCode=$channelCode, channelName='$resolvedName'")
+                withContext(Dispatchers.IO) { ctx.saveChannelLocally(channelCode, userIds, "GROUP", resolvedName) }
             }
             ctx.resolveToJs("createGroupChatRoom", result)
         } catch (e: Exception) {
@@ -130,6 +141,8 @@ class ChannelActionHandler(
         val channels = root.optJSONArray("channels") ?: return JSONArray()
         for (i in 0 until channels.length()) {
             val ch = channels.getJSONObject(i)
+            val channelCode = ch.optString("channelCode", "")
+            ch.put("muted", ctx.appConfig.isChannelMuted(channelCode))
             val members = ch.optJSONArray("channelMemberList") ?: continue
             for (j in 0 until members.length()) {
                 val m = members.getJSONObject(j)

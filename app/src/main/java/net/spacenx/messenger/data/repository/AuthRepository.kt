@@ -2,6 +2,7 @@ package net.spacenx.messenger.data.repository
 
 import android.util.Log
 import kotlinx.coroutines.CancellationException
+import net.spacenx.messenger.util.FileLogger
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
@@ -345,6 +346,7 @@ class AuthRepository(
      */
     private suspend fun syncConfig(userId: String): Boolean {
         Log.d(TAG, "syncConfig() called for user: $userId")
+        FileLogger.log(TAG, "syncConfig REQ userId=$userId")
         try {
             val commonDb = databaseProvider.getCommonDatabase()
             val lastSyncTime = commonDb.syncMetaDao().getValue(SYNC_META_CONFIG_KEY) ?: 0L
@@ -357,11 +359,13 @@ class AuthRepository(
 
             if (response.code() == 401 || response.code() == 403) {
                 Log.e(TAG, "syncConfig auth error: ${response.code()}")
+                FileLogger.log(TAG, "syncConfig AUTH ERROR code=${response.code()}")
                 return false
             }
 
             if (!response.isSuccessful) {
                 Log.e(TAG, "syncConfig HTTP error: ${response.code()}")
+                FileLogger.log(TAG, "syncConfig HTTP ERROR code=${response.code()}")
                 return false
             }
 
@@ -417,10 +421,12 @@ class AuthRepository(
             // 인메모리 캐시 갱신
             appConfig.updateConfigCache(configMap)
             Log.d(TAG, "syncConfig complete: serverTime=$serverTime, configs=${configEntities.size}")
+            FileLogger.log(TAG, "syncConfig DONE configs=${configEntities.size} serverTime=$serverTime")
 
             return true
         } catch (e: Exception) {
             Log.e(TAG, "syncConfig error: ${e.message}", e)
+            FileLogger.log(TAG, "syncConfig ERROR ${e.message}")
             return false
         }
     }
@@ -437,6 +443,7 @@ class AuthRepository(
             return RefreshResult.TOKEN_INVALID
         }
         Log.d(TAG, "restRefreshToken() called")
+        FileLogger.log(TAG, "restRefreshToken REQ")
         try {
             val baseUrl = appConfig.getRestBaseUrl()
             val authApi = ApiClient.createAuthApiFromBaseUrl(baseUrl)
@@ -447,7 +454,7 @@ class AuthRepository(
             if (!response.isSuccessful) {
                 val code = response.code()
                 Log.e(TAG, "refreshToken HTTP error: $code")
-                // 401/403 = 토큰 무효, 그 외 서버 오류는 재시도 가능
+                FileLogger.log(TAG, "restRefreshToken HTTP ERROR code=$code")
                 return if (code == 401 || code == 403) RefreshResult.TOKEN_INVALID else RefreshResult.NETWORK_ERROR
             }
 
@@ -468,21 +475,25 @@ class AuthRepository(
                 sessionManager.refreshToken = newRefresh
                 appConfig.saveTokens(newToken, newRefresh)
                 Log.d(TAG, "refreshToken success - tokens updated")
+                FileLogger.log(TAG, "restRefreshToken DONE SUCCESS")
                 return RefreshResult.SUCCESS
             }
             return RefreshResult.TOKEN_INVALID
         } catch (e: java.net.ConnectException) {
             Log.e(TAG, "refreshToken network error (ConnectException): ${e.message}")
+            FileLogger.log(TAG, "restRefreshToken ERROR ConnectException: ${e.message}")
             return RefreshResult.NETWORK_ERROR
         } catch (e: java.net.SocketTimeoutException) {
             Log.e(TAG, "refreshToken network error (Timeout): ${e.message}")
+            FileLogger.log(TAG, "restRefreshToken ERROR Timeout: ${e.message}")
             return RefreshResult.NETWORK_ERROR
         } catch (e: java.io.IOException) {
             Log.e(TAG, "refreshToken network error (IOException): ${e.message}")
+            FileLogger.log(TAG, "restRefreshToken ERROR IOException: ${e.message}")
             return RefreshResult.NETWORK_ERROR
         } catch (e: Exception) {
-            // 예상치 못한 예외(SSL, JSON 파싱 등)는 네트워크 오류로 처리 → 재시도 허용
             Log.e(TAG, "refreshToken unexpected error: ${e.message}", e)
+            FileLogger.log(TAG, "restRefreshToken ERROR ${e.javaClass.simpleName}: ${e.message}")
             return RefreshResult.NETWORK_ERROR
         }
     }

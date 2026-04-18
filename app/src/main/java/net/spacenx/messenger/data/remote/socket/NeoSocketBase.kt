@@ -3,7 +3,7 @@ package net.spacenx.messenger.data.remote.socket
 /**
  * NEO Binary Protocol 소켓 클라이언트 공통 인터페이스.
  * 구체 구현:
- *  - [BinarySocketClient] — TLS TCP (기본, 포트 18000)
+ *  - [BinarySocketClient] — WebSocket/TLS (기본, 포트 18020)
  *  - [net.spacenx.messenger.data.remote.socket.quic.QuicSocketClient] — QUIC (옵션, 포트 18029)
  *
  * 8-byte header + JSON body 프레임 포맷은 [net.spacenx.messenger.data.remote.socket.codec.BinaryFrameCodec] 공유.

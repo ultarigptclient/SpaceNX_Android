@@ -8,8 +8,6 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.flow.MutableSharedFlow
-import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 import net.spacenx.messenger.common.AppConfig
@@ -61,11 +59,9 @@ class SyncService @Inject constructor(
     var syncChatDeferred = CompletableDeferred<Unit>()
         private set
 
-    private val _orgListReady = MutableSharedFlow<String>(replay = 1, extraBufferCapacity = 1)
-    val orgListReady: SharedFlow<String> = _orgListReady
-
-    private val _buddyListReady = MutableSharedFlow<String>(replay = 1, extraBufferCapacity = 1)
-    val buddyListReady: SharedFlow<String> = _buddyListReady
+    /** 마지막 buddy sync 완료 시각 (ms). OrgHandler에서 중복 sync 방지용 */
+    @Volatile var lastBuddySyncMs: Long = 0L
+        private set
 
     fun syncOrgAndBuddy(userId: String, useCache: Boolean = false) {
         Log.d(TAG, "syncOrgAndBuddy: userId=$userId, useCache=$useCache")
@@ -100,16 +96,17 @@ class SyncService @Inject constructor(
                             .also { Log.d(TAG, "${logPrefix}syncChannel=$it") }
                     }
 
-                    // syncOrg 완료 → emitOrgList → syncBuddy
+                    // syncOrg 완료 → syncBuddy
                     orgDeferred.await()
-                    emitOrgList()
                     val buddySuccess = withTimeoutOrNull(15_000L) { buddyRepo.syncBuddy(userId) } ?: false
                     Log.d(TAG, "${logPrefix}syncBuddy=$buddySuccess")
 
-                    // myPart 완료 대기 (emitBuddyList에서 myDeptId 사용)
+                    // myPart 완료 대기 (buildBuddyListJson에서 myDeptId 사용)
                     myPartDeferred.await()
+                    lastBuddySyncMs = System.currentTimeMillis()
+                    Log.d(TAG, "buddy sync complete — lastBuddySyncMs set, signaling startBackgroundSync")
                     syncBuddyDeferred.complete(Unit)
-                    val rawBuddyJson = emitBuddyList()
+                    val rawBuddyJson = buildBuddyListJson()
                     autoSubscribeUsers(rawBuddyJson)
 
                     // syncChannel 완료 → syncChat
@@ -256,6 +253,26 @@ class SyncService @Inject constructor(
                     syncStatusCallback?.invoke("thread", "error", null, null)
                     notifyCallback("threadReady")
                 }
+                try {
+                    syncStatusCallback?.invoke("calendar", "syncing", null, null)
+                    projectRepo.syncCalendar()
+                    syncStatusCallback?.invoke("calendar", "done", null, null)
+                    notifyCallback("calReady")
+                } catch (e: Exception) {
+                    Log.e(TAG, "syncCalendar error: ${e.message}")
+                    syncStatusCallback?.invoke("calendar", "error", null, null)
+                    notifyCallback("calReady")
+                }
+                try {
+                    syncStatusCallback?.invoke("todo", "syncing", null, null)
+                    projectRepo.syncTodo()
+                    syncStatusCallback?.invoke("todo", "done", null, null)
+                    notifyCallback("todoReady")
+                } catch (e: Exception) {
+                    Log.e(TAG, "syncTodo error: ${e.message}")
+                    syncStatusCallback?.invoke("todo", "error", null, null)
+                    notifyCallback("todoReady")
+                }
             }
         }
     }
@@ -272,28 +289,12 @@ class SyncService @Inject constructor(
         orgBuddySyncJob = null
         backgroundSyncJobs.forEach { it.cancel() }
         backgroundSyncJobs.clear()
-        // 로그아웃 시 replay 캐시 초기화 — 다음 사용자가 이전 org/buddy 데이터를 받지 않도록
-        _orgListReady.resetReplayCache()
-        _buddyListReady.resetReplayCache()
+        lastBuddySyncMs = 0L
     }
-
-    /** collect 후 replay 캐시 초기화 — Activity 재생성 시 중복 전달 방지 */
-    fun resetOrgListReplay() { _orgListReady.resetReplayCache() }
-    fun resetBuddyListReplay() { _buddyListReady.resetReplayCache() }
 
     // ── 내부 헬퍼 ──
 
-    private suspend fun emitOrgList() {
-        try {
-            val orgListJson = orgRepo.getRootDeptsAsJson()
-            Log.d(TAG, "emitOrgList: ready")
-            _orgListReady.tryEmit(orgListJson)
-        } catch (e: Exception) {
-            Log.e(TAG, "emitOrgList failed: ${e.message}")
-        }
-    }
-
-    private suspend fun emitBuddyList(): String {
+    private suspend fun buildBuddyListJson(): String {
         val rawBuddyJson = buddyRepo.getBuddyListWithUserInfo()
         try {
             val buddyJson = JSONObject(rawBuddyJson)
@@ -331,11 +332,9 @@ class SyncService @Inject constructor(
                 }
                 buddyJson.put("buddies", buddies)
             }
-            Log.d(TAG, "emitBuddyList: ready")
-            _buddyListReady.tryEmit(buddyJson.toString())
             return buddyJson.toString()
         } catch (e: Exception) {
-            Log.e(TAG, "emitBuddyList failed: ${e.message}")
+            Log.e(TAG, "buildBuddyListJson failed: ${e.message}")
         }
         return rawBuddyJson
     }

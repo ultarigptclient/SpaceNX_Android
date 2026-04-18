@@ -29,4 +29,10 @@ interface IssueDao {
 
     @Query("DELETE FROM issues WHERE projectCode = :projectCode")
     suspend fun deleteByProject(projectCode: String)
+
+    @Query("SELECT * FROM issues WHERE (projectCode = '' OR projectCode IS NULL) AND assigneeUserId = :userId")
+    suspend fun getTodosByUser(userId: String): List<IssueEntity>
+
+    @Query("SELECT * FROM issues WHERE projectCode = '' OR projectCode IS NULL")
+    suspend fun getAllTodos(): List<IssueEntity>
 }

@@ -378,13 +378,8 @@ object ApiClient {
 
     /**
      * Upload a file via streaming multipart POST (메모리에 전체 로드하지 않음).
-     * @param inputStream 파일 InputStream (호출 측에서 close 불필요 — 내부에서 처리)
-     * @param fileName 파일 이름
-     * @param mimeType MIME 타입
-     * @param contentLength 파일 크기 (진행률 계산용, 0이면 unknown)
-     * @param uploadUrl 업로드 URL
-     * @param token Bearer 토큰
-     * @param onProgress 진행률 콜백 (sent, total)
+     * writeTo가 재시도(OkHttp 내부 follow-up 또는 application retry)로 두 번 호출될 수 있으므로
+     * File을 받아 매번 새 InputStream을 연다 — one-shot InputStream은 Stream Closed 유발.
      */
     /** 파일 업로드 전용 OkHttpClient (타임아웃 확장) */
     private val uploadClient: OkHttpClient by lazy {
@@ -396,22 +391,22 @@ object ApiClient {
     }
 
     fun uploadFileStream(
-        inputStream: java.io.InputStream,
+        file: java.io.File,
         fileName: String,
         mimeType: String,
-        contentLength: Long,
         uploadUrl: String,
         token: String? = null,
         onProgress: ((sent: Long, total: Long) -> Unit)? = null
     ): JSONObject {
         val mediaType = mimeType.toMediaType()
+        val contentLength = file.length()
         val fileBody = object : okhttp3.RequestBody() {
             override fun contentType() = mediaType
             override fun contentLength() = if (contentLength > 0) contentLength else -1L
             override fun writeTo(sink: okio.BufferedSink) {
                 val buffer = ByteArray(8192)
                 var totalSent = 0L
-                inputStream.use { stream ->
+                file.inputStream().use { stream ->
                     var read: Int
                     while (stream.read(buffer).also { read = it } != -1) {
                         sink.write(buffer, 0, read)
@@ -431,6 +426,10 @@ object ApiClient {
         if (!token.isNullOrEmpty()) reqBuilder.addHeader("Authorization", "Bearer $token")
         val response = uploadClient.newCall(reqBuilder.build()).execute()
         val raw = response.body?.string() ?: "{}"
+        android.util.Log.d("ApiClient", "uploadFileStream: url=$uploadUrl, file=$fileName, size=$contentLength, status=${response.code}, bodyLen=${raw.length}, preview=${raw.take(400)}")
+        if (!response.isSuccessful) {
+            throw java.io.IOException("HTTP ${response.code}: ${raw.take(200)}")
+        }
         return try { JSONObject(raw) } catch (_: Exception) { JSONObject().put("raw", raw) }
     }
 

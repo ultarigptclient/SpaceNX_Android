@@ -8,6 +8,10 @@ import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Canvas
+import android.graphics.Paint
+import android.graphics.PorterDuff
+import android.graphics.PorterDuffXfermode
 import android.media.AudioAttributes
 import android.media.RingtoneManager
 import android.os.Build
@@ -228,7 +232,7 @@ class NotificationGroupManager(
 
         val msgCount = synchronized(messages) { messages.size }
         return NotificationCompat.Builder(context, CHANNEL_ID)
-            .setSmallIcon(R.mipmap.ic_launcher)
+            .setSmallIcon(R.drawable.ic_notification)
             .setLargeIcon(senderBitmap)
             .setContentIntent(pendingIntent)
             .setStyle(style)
@@ -269,7 +273,7 @@ class NotificationGroupManager(
         } else null
 
         return NotificationCompat.Builder(context, CHANNEL_ID)
-            .setSmallIcon(R.mipmap.ic_launcher)
+            .setSmallIcon(R.drawable.ic_notification)
             .apply { if (senderBitmap != null) setLargeIcon(senderBitmap) }
             .setContentTitle(title)
             .setContentText(body)
@@ -283,7 +287,7 @@ class NotificationGroupManager(
     @SuppressLint("MissingPermission")
     private fun showGroupSummary(nm: NotificationManagerCompat) {
         val summary = NotificationCompat.Builder(context, CHANNEL_ID)
-            .setSmallIcon(R.mipmap.ic_launcher)
+            .setSmallIcon(R.drawable.ic_notification)
             .setContentTitle("메신저")
             .setGroup(GROUP_KEY)
             .setGroupSummary(true)
@@ -403,13 +407,25 @@ class NotificationGroupManager(
             val bytes = response.body?.bytes() ?: return null
             val raw = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return null
             val resized = Bitmap.createScaledBitmap(raw, PHOTO_SIZE_PX, PHOTO_SIZE_PX, true)
-            photoCache.put(userId, resized)
+            val circular = toCircleBitmap(resized)
+            photoCache.put(userId, circular)
             Log.d(TAG, "loadBitmap: loaded photo for $userId")
-            resized
+            circular
         } catch (e: Exception) {
             Log.w(TAG, "loadBitmap: failed for $userId", e)
             null
         }
+    }
+
+    private fun toCircleBitmap(src: Bitmap): Bitmap {
+        val size = minOf(src.width, src.height)
+        val output = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(output)
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+        canvas.drawCircle(size / 2f, size / 2f, size / 2f, paint)
+        paint.xfermode = PorterDuffXfermode(PorterDuff.Mode.SRC_IN)
+        canvas.drawBitmap(src, 0f, 0f, paint)
+        return output
     }
 
     private fun isMainThread() = Looper.myLooper() == Looper.getMainLooper()

@@ -3,6 +3,8 @@ package net.spacenx.messenger.data.repository
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import net.spacenx.messenger.BuildConfig
+import net.spacenx.messenger.util.FileLogger
 import kotlinx.coroutines.withTimeoutOrNull
 import net.spacenx.messenger.common.AppConfig
 import net.spacenx.messenger.common.AppConfig.Companion.EP_COMM_SYNC_NOTI
@@ -43,6 +45,7 @@ class NotiRepository(
                 val userId = appConfig.getSavedUserId() ?: ""
 
                 Log.d(TAG, "syncNoti: userId=$userId, lastOffset=$lastOffset")
+                FileLogger.log(TAG, "syncNoti REQ userId=$userId offset=$lastOffset")
 
                 val commApi = ApiClient.createCommApiFromBaseUrl(appConfig.getRestBaseUrl(), token)
                 val endpoint = appConfig.getEndpoint(EP_COMM_SYNC_NOTI, "api/noti/syncnoti")
@@ -70,7 +73,7 @@ class NotiRepository(
                 val json = JSONObject(rawJson)
                 val errorCode = json.optInt("errorCode", -1)
 
-                Log.d(TAG, "syncNoti get json=$json")
+                if (BuildConfig.DEBUG) Log.d(TAG, "syncNoti get json=$json")
 
                 if (errorCode != 0) {
                     return@withContext mapOf<String, Any>("errorCode" to errorCode)
@@ -112,6 +115,7 @@ class NotiRepository(
                 }
 
                 Log.d(TAG, "syncNoti complete: upsert=$upsertCount, read=$readCount, delete=$deleteCount, lastEventId=$lastEventId")
+                FileLogger.log(TAG, "syncNoti DONE upsert=$upsertCount read=$readCount delete=$deleteCount lastEventId=$lastEventId")
                 mapOf<String, Any>(
                     "errorCode" to 0,
                     "upsertCount" to upsertCount,
@@ -120,6 +124,7 @@ class NotiRepository(
                 )
             } catch (e: Exception) {
                 Log.e(TAG, "syncNoti error: ${e.message}", e)
+                FileLogger.log(TAG, "syncNoti ERROR ${e.message}")
                 mapOf<String, Any>("errorCode" to -1, "errorMessage" to (e.message ?: "Unknown error"))
             }
         }

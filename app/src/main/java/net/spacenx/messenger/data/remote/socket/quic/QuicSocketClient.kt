@@ -78,6 +78,7 @@ class QuicSocketClient(
         Log.d(TAG, "connect() to ${config.host}:${config.port} (ALPN=$ALPN)")
         try {
             doConnect()
+            awaitWhoAU()
             connected = true
             clientScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
             clientScope?.launch { startReadLoop() }
@@ -164,6 +165,29 @@ class QuicSocketClient(
         outputStream = s.outputStream
         inputStream = s.inputStream
         Log.d(TAG, "[QUIC-STEP 6/6] ★★★ QUIC 전체 연결 완료 ★★★ streamId=${s.streamId}")
+    }
+
+    // ── WhoAU? welcome 핸드셰이크 수신 대기 ──
+
+    private fun awaitWhoAU() {
+        Log.i(TAG, "[NeoHS 1/4] QUIC 스트림 오픈 완료 → WhoAU? 대기 중 (timeout=10s)")
+        val ins = inputStream ?: throw IllegalStateException("QUIC input stream not ready")
+        val buf = ByteArray(64)
+        val accumulated = java.io.ByteArrayOutputStream()
+        val deadline = System.currentTimeMillis() + 10_000L
+
+        while (System.currentTimeMillis() < deadline) {
+            val n = ins.read(buf)
+            if (n < 0) throw java.io.IOException("Stream closed while waiting for WhoAU?")
+            if (n == 0) continue
+            accumulated.write(buf, 0, n)
+            val text = accumulated.toString(Charsets.UTF_8.name())
+            if (text.contains("WhoAU?")) {
+                Log.i(TAG, "[NeoHS 2/4] WhoAU? 수신 완료 → onConnected() 호출 (raw=\"${text.trim()}\")")
+                return
+            }
+        }
+        throw java.io.IOException("WhoAU? greeting not received within 10s")
     }
 
     private suspend fun startSendLoop() {

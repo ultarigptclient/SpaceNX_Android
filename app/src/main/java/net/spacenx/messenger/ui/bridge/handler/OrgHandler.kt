@@ -1,7 +1,12 @@
 package net.spacenx.messenger.ui.bridge.handler
 
+import android.app.AlertDialog
+import android.text.InputType
 import android.util.Log
+import android.widget.EditText
+import android.widget.FrameLayout
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import net.spacenx.messenger.data.remote.api.ApiClient
 import net.spacenx.messenger.data.repository.BuddyRepository
@@ -10,6 +15,7 @@ import net.spacenx.messenger.data.repository.PubSubRepository
 import net.spacenx.messenger.ui.bridge.BridgeContext
 import org.json.JSONArray
 import org.json.JSONObject
+import kotlin.coroutines.resume
 
 class OrgHandler(
     private val ctx: BridgeContext,
@@ -32,6 +38,10 @@ class OrgHandler(
             "getMyPart" -> handleGetMyPart(params)
             "addBuddy" -> handleAddBuddy(params)
             "removeBuddy" -> handleRemoveBuddy(params)
+            "addBuddyGroup" -> handleAddBuddyGroup()
+            "deleteBuddyGroup" -> handleDeleteBuddyGroup(params)
+            "renameBuddyGroup" -> handleRenameBuddyGroup(params)
+            "createSubGroup" -> handleCreateSubGroup(params)
         }
     }
 
@@ -49,7 +59,12 @@ class OrgHandler(
         try {
             val deptId = ctx.paramStr(params, "deptId")
             val json = withContext(Dispatchers.IO) { orgRepo.getSubOrgAsJson(deptId) }
-            ctx.resolveToJs("getOrgSubList", json)
+            val d = ctx.esc(json)
+            ctx.evalJs(
+                "(function(){var d='$d';" +
+                "if(window.__goslResolve&&window.__goslResolve(d))return;" +
+                "window._getOrgSubListResolve&&window._getOrgSubListResolve(d);})()"
+            )
             ctx.subscribeUsersFromJson(json, "users")
         } catch (e: Exception) {
             ctx.rejectToJs("getOrgSubList", e.message)
@@ -144,8 +159,15 @@ class OrgHandler(
         if (ctx.guardDbNotReady("syncBuddy")) return
         try {
             val userId = ctx.appConfig.getSavedUserId() ?: ""
-            if (userId.isNotEmpty()) {
+            // 30초 이내에 네이티브 초기 sync가 완료됐으면 재동기화 skip — 로그인 직후 buddyReady
+            // 이벤트를 받은 React가 다시 syncBuddy를 호출해 API가 중복 실행되는 문제 방지
+            val elapsed = System.currentTimeMillis() - ctx.loginViewModel.lastBuddySyncMs
+            val recentlySynced = userId.isNotEmpty() && elapsed < 30_000L
+            if (userId.isNotEmpty() && !recentlySynced) {
+                Log.d(TAG, "syncBuddy: API call (elapsed=${elapsed}ms)")
                 withContext(Dispatchers.IO) { buddyRepo.syncBuddy(userId) }
+            } else {
+                Log.d(TAG, "syncBuddy: skip API — recently synced ${elapsed}ms ago, returning local cache")
             }
             val rawJson = withContext(Dispatchers.IO) { buddyRepo.getBuddyListWithUserInfo() }
             // dept 폴더는 React가 getOrgSubList로 수신 — enrichment 없이 raw 반환
@@ -218,7 +240,13 @@ class OrgHandler(
         try {
             val userId = ctx.paramStr(params, "userId").ifEmpty { ctx.appConfig.getSavedUserId() ?: "" }
             val rawJson = withContext(Dispatchers.IO) { orgRepo.getMyPart(userId) }
-            ctx.resolveToJs("getMyPart", rawJson)
+            val d = ctx.esc(rawJson)
+            // shim(__gmpResolve)으로 동시 대기 중인 resolve 함수 전부 호출, 없으면 단일 슬롯 fallback
+            ctx.evalJs(
+                "(function(){var d='$d';" +
+                "if(window.__gmpResolve&&window.__gmpResolve(d))return;" +
+                "window._getMyPartResolve&&window._getMyPartResolve(d);})()"
+            )
             ctx.subscribeUsersFromJson(rawJson, "users")
         } catch (e: Exception) {
             ctx.rejectToJs("getMyPart", e.message)
@@ -234,6 +262,7 @@ class OrgHandler(
             val errorCode = result.optInt("errorCode", -1)
             if (errorCode == 0) {
                 withContext(Dispatchers.IO) { buddyRepo.syncBuddy(ctx.appConfig.getSavedUserId() ?: "") }
+                ctx.notifyReact("buddyReady")
             }
             ctx.resolveToJs("addUserToMyList", result)
         } catch (e: Exception) {
@@ -245,16 +274,26 @@ class OrgHandler(
         try {
             val myUserId = ctx.appConfig.getSavedUserId() ?: ""
             val targetUserId = ctx.paramStr(params, "userId")
+            val buddyName = withContext(Dispatchers.IO) {
+                val user = ctx.dbProvider.getOrgDatabase().userDao().getByUserId(targetUserId)
+                if (user != null) JSONObject(user.userInfo).optString("userName", "") else ""
+            }
             val result = withContext(Dispatchers.IO) {
                 val token = ctx.loginViewModel.sessionManager.jwtToken
                 ApiClient.postJson(
-                    ctx.appConfig.getEndpointByPath("/buddy/addlink"),
-                    JSONObject().put("userIds", JSONArray().put(targetUserId)).put("groupId", "0"),
+                    ctx.appConfig.getEndpointByPath("/buddy/buddyadd"),
+                    JSONObject()
+                        .put("userId", myUserId)
+                        .put("buddyId", targetUserId)
+                        .put("buddyParent", "0")
+                        .put("buddyName", buddyName)
+                        .put("buddyType", "0"),
                     token
                 )
             }
             if (result.optInt("errorCode", -1) == 0) {
                 withContext(Dispatchers.IO) { buddyRepo.syncBuddy(myUserId) }
+                ctx.notifyReact("buddyReady")
             }
             ctx.resolveToJs("addBuddy", result)
         } catch (e: Exception) {
@@ -278,10 +317,218 @@ class OrgHandler(
             }
             if (result.optInt("errorCode", -1) == 0) {
                 withContext(Dispatchers.IO) { buddyRepo.syncBuddy(myUserId) }
+                ctx.notifyReact("buddyReady")
             }
             ctx.resolveToJs("removeBuddy", result)
         } catch (e: Exception) {
             ctx.rejectToJs("removeBuddy", e.message)
         }
     }
+
+    private suspend fun handleAddBuddyGroup() {
+        try {
+            val name = promptForText("최상위 그룹 추가", "", "그룹 이름")?.trim().orEmpty()
+            if (name.isEmpty()) {
+                ctx.resolveToJs("addBuddyGroup", JSONObject().put("errorCode", 0).put("cancelled", true))
+                return
+            }
+            val myUserId = ctx.appConfig.getSavedUserId() ?: ""
+            val result = createBuddyGroup(myUserId, newGroupId(), "0", name)
+            if (result.optInt("errorCode", -1) == 0) {
+                withContext(Dispatchers.IO) { buddyRepo.syncBuddy(myUserId) }
+                ctx.notifyReact("buddyReady")
+            }
+            ctx.resolveToJs("addBuddyGroup", result)
+        } catch (e: Exception) {
+            ctx.rejectToJs("addBuddyGroup", e.message)
+        }
+    }
+
+    private suspend fun handleCreateSubGroup(params: Map<String, Any?>) {
+        try {
+            val parentId = paramGroupId(params)
+            if (parentId.isEmpty()) {
+                ctx.rejectToJs("createSubGroup", "groupId required")
+                return
+            }
+            val name = promptForText("하위 그룹 생성", "", "그룹 이름")?.trim().orEmpty()
+            if (name.isEmpty()) {
+                ctx.resolveToJs("createSubGroup", JSONObject().put("errorCode", 0).put("cancelled", true))
+                return
+            }
+            val myUserId = ctx.appConfig.getSavedUserId() ?: ""
+            val result = createBuddyGroup(myUserId, newGroupId(), parentId, name)
+            if (result.optInt("errorCode", -1) == 0) {
+                withContext(Dispatchers.IO) { buddyRepo.syncBuddy(myUserId) }
+                ctx.notifyReact("buddyReady")
+            }
+            ctx.resolveToJs("createSubGroup", result)
+        } catch (e: Exception) {
+            ctx.rejectToJs("createSubGroup", e.message)
+        }
+    }
+
+    private suspend fun handleRenameBuddyGroup(params: Map<String, Any?>) {
+        try {
+            val buddyId = paramGroupId(params)
+            if (buddyId.isEmpty()) {
+                ctx.rejectToJs("renameBuddyGroup", "groupId required")
+                return
+            }
+            val existing = withContext(Dispatchers.IO) {
+                ctx.dbProvider.getOrgDatabase().buddyDao().getByBuddyId(buddyId)
+            }
+            if (existing == null) {
+                ctx.rejectToJs("renameBuddyGroup", "group not found")
+                return
+            }
+            val newName = promptForText("그룹 이름 변경", existing.buddyName, "그룹 이름")?.trim().orEmpty()
+            if (newName.isEmpty() || newName == existing.buddyName) {
+                ctx.resolveToJs("renameBuddyGroup", JSONObject().put("errorCode", 0).put("cancelled", true))
+                return
+            }
+            val myUserId = ctx.appConfig.getSavedUserId() ?: ""
+            val result = withContext(Dispatchers.IO) {
+                val token = ctx.loginViewModel.sessionManager.jwtToken
+                ApiClient.postJson(
+                    ctx.appConfig.getEndpointByPath("/buddy/buddymod"),
+                    JSONObject()
+                        .put("userId", myUserId)
+                        .put("buddyId", buddyId)
+                        .put("buddyParent", existing.buddyParent)
+                        .put("buddyName", newName),
+                    token
+                )
+            }
+            if (result.optInt("errorCode", -1) == 0) {
+                withContext(Dispatchers.IO) { buddyRepo.syncBuddy(myUserId) }
+                ctx.notifyReact("buddyReady")
+            }
+            ctx.resolveToJs("renameBuddyGroup", result)
+        } catch (e: Exception) {
+            ctx.rejectToJs("renameBuddyGroup", e.message)
+        }
+    }
+
+    private suspend fun handleDeleteBuddyGroup(params: Map<String, Any?>) {
+        try {
+            val buddyId = paramGroupId(params)
+            if (buddyId.isEmpty()) {
+                ctx.rejectToJs("deleteBuddyGroup", "groupId required")
+                return
+            }
+            val existing = withContext(Dispatchers.IO) {
+                ctx.dbProvider.getOrgDatabase().buddyDao().getByBuddyId(buddyId)
+            }
+            if (existing == null) {
+                ctx.rejectToJs("deleteBuddyGroup", "group not found")
+                return
+            }
+            val confirmed = promptForConfirm(
+                "그룹 삭제",
+                "'${existing.buddyName}' 그룹을 삭제하시겠습니까?"
+            )
+            if (!confirmed) {
+                ctx.resolveToJs("deleteBuddyGroup", JSONObject().put("errorCode", 0).put("cancelled", true))
+                return
+            }
+            val myUserId = ctx.appConfig.getSavedUserId() ?: ""
+            val result = withContext(Dispatchers.IO) {
+                val token = ctx.loginViewModel.sessionManager.jwtToken
+                ApiClient.postJson(
+                    ctx.appConfig.getEndpointByPath("/buddy/buddydel"),
+                    JSONObject()
+                        .put("userId", myUserId)
+                        .put("buddyId", buddyId)
+                        .put("buddyParent", existing.buddyParent),
+                    token
+                )
+            }
+            if (result.optInt("errorCode", -1) == 0) {
+                withContext(Dispatchers.IO) { buddyRepo.syncBuddy(myUserId) }
+                ctx.notifyReact("buddyReady")
+            }
+            ctx.resolveToJs("deleteBuddyGroup", result)
+        } catch (e: Exception) {
+            ctx.rejectToJs("deleteBuddyGroup", e.message)
+        }
+    }
+
+    private fun newGroupId(): String =
+        "g_${System.currentTimeMillis().toString(36)}${(1000..9999).random()}"
+
+    private fun paramGroupId(params: Map<String, Any?>): String {
+        val keys = listOf("buddyId", "groupId", "id")
+        for (k in keys) {
+            val v = ctx.paramStr(params, k)
+            if (v.isNotEmpty()) return v
+        }
+        return ""
+    }
+
+    private suspend fun createBuddyGroup(
+        userId: String,
+        buddyId: String,
+        buddyParent: String,
+        buddyName: String
+    ): JSONObject = withContext(Dispatchers.IO) {
+        val token = ctx.loginViewModel.sessionManager.jwtToken
+        ApiClient.postJson(
+            ctx.appConfig.getEndpointByPath("/buddy/buddyadd"),
+            JSONObject()
+                .put("userId", userId)
+                .put("buddyId", buddyId)
+                .put("buddyParent", buddyParent)
+                .put("buddyName", buddyName)
+                .put("buddyType", "6")
+                .put("buddyOrder", "999999"),
+            token
+        )
+    }
+
+    private suspend fun promptForText(title: String, prefill: String, hint: String): String? =
+        suspendCancellableCoroutine { cont ->
+            ctx.activity.runOnUiThread {
+                val editText = EditText(ctx.activity).apply {
+                    this.hint = hint
+                    setText(prefill)
+                    setSelection(prefill.length)
+                    inputType = InputType.TYPE_CLASS_TEXT
+                }
+                val dp = ctx.activity.resources.displayMetrics.density
+                val container = FrameLayout(ctx.activity).apply {
+                    val pad = (24 * dp).toInt()
+                    setPadding(pad, (8 * dp).toInt(), pad, 0)
+                    addView(editText)
+                }
+                val resumed = java.util.concurrent.atomic.AtomicBoolean(false)
+                val resumeOnce: (String?) -> Unit = { value ->
+                    if (resumed.compareAndSet(false, true) && cont.isActive) cont.resume(value)
+                }
+                AlertDialog.Builder(ctx.activity)
+                    .setTitle(title)
+                    .setView(container)
+                    .setPositiveButton("확인") { _, _ -> resumeOnce(editText.text.toString()) }
+                    .setNegativeButton("취소") { _, _ -> resumeOnce(null) }
+                    .setOnCancelListener { resumeOnce(null) }
+                    .show()
+            }
+        }
+
+    private suspend fun promptForConfirm(title: String, message: String): Boolean =
+        suspendCancellableCoroutine { cont ->
+            ctx.activity.runOnUiThread {
+                val resumed = java.util.concurrent.atomic.AtomicBoolean(false)
+                val resumeOnce: (Boolean) -> Unit = { value ->
+                    if (resumed.compareAndSet(false, true) && cont.isActive) cont.resume(value)
+                }
+                AlertDialog.Builder(ctx.activity)
+                    .setTitle(title)
+                    .setMessage(message)
+                    .setPositiveButton("확인") { _, _ -> resumeOnce(true) }
+                    .setNegativeButton("취소") { _, _ -> resumeOnce(false) }
+                    .setOnCancelListener { resumeOnce(false) }
+                    .show()
+            }
+        }
 }

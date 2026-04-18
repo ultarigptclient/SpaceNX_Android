@@ -3,6 +3,7 @@ package net.spacenx.messenger.data.repository
 import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import net.spacenx.messenger.util.FileLogger
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -57,6 +58,7 @@ class MessageRepository(
                 val userId = appConfig.getSavedUserId() ?: ""
 
                 Log.d(TAG, "syncMessage: userId=$userId, lastOffset=$lastOffset")
+                FileLogger.log(TAG, "syncMessage REQ userId=$userId offset=$lastOffset")
 
                 val commApi = ApiClient.createCommApiFromBaseUrl(appConfig.getRestBaseUrl(), token)
                 val endpoint = appConfig.getEndpoint(EP_COMM_SYNC_MESSAGE, "api/comm/syncmessage")
@@ -211,6 +213,7 @@ class MessageRepository(
                 } while (true)
 
                 Log.d(TAG, "syncMessage complete: upsert=$upsertCount, read=$readCount, delete=$deleteCount, lastEventId=$currentOffset")
+                FileLogger.log(TAG, "syncMessage DONE upsert=$upsertCount read=$readCount delete=$deleteCount lastOffset=$currentOffset")
                 mapOf<String, Any>(
                     "errorCode" to 0,
                     "upsertCount" to upsertCount,
@@ -220,6 +223,7 @@ class MessageRepository(
                 )
             } catch (e: Exception) {
                 Log.e(TAG, "syncMessage error: ${e.message}", e)
+                FileLogger.log(TAG, "syncMessage ERROR ${e.message}")
                 mapOf<String, Any>("errorCode" to -1, "errorMessage" to (e.message ?: "Unknown error"))
             }
         }

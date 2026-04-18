@@ -36,7 +36,7 @@ interface BridgeContext {
     fun guardDbNotReady(action: String): Boolean
     suspend fun handleRestForward(action: String, path: String, params: Map<String, Any?>)
     suspend fun updateCrudOffset(commandName: String, response: JSONObject)
-    suspend fun saveChannelLocally(channelCode: String, members: List<String>, type: String = "")
+    suspend fun saveChannelLocally(channelCode: String, members: List<String>, type: String = "", channelName: String = "")
     fun subscribeUsersFromJson(jsonStr: String, arrayKey: String)
 
     // 파라미터 유틸리티

@@ -26,6 +26,7 @@ import net.spacenx.messenger.data.remote.socket.codec.ProtocolCommand
 import net.spacenx.messenger.data.remote.socket.quic.QuicSocketClient
 import net.spacenx.messenger.data.remote.socket.quic.WebTransportQuicSocket
 import org.json.JSONObject
+import net.spacenx.messenger.util.FileLogger
 
 /**
  * 소켓 연결/해제, HI, Logout, RefreshToken, TIME_REQUEST, NOOP 토큰 교환, 프레임 라우팅 담당
@@ -56,7 +57,7 @@ class SocketSessionManager(
         val l = listenerOverride ?: binarySocketEventListener
         return when (config.transport) {
             Transport.TCP -> BinarySocketClient(
-                context, config, l,
+                config, l,
                 noopBodyProvider = { buildNoopBody() }
             )
             Transport.QUIC -> if (WebTransportQuicSocket.isSupported) {
@@ -117,6 +118,9 @@ class SocketSessionManager(
     // NHM-68: 재접속 콜백
     var onReconnected: (() -> Unit)? = null
     var onAuthFailed: (() -> Unit)? = null
+
+    /** 소켓으로 수신된 raw JSON 알림 프레임 콜백 (FCM 포맷과 동일한 구조) */
+    var onRawSocketJson: ((JSONObject) -> Unit)? = null
 
     // 재접속 상태
     private val isReconnecting = AtomicBoolean(false)
@@ -218,13 +222,14 @@ class SocketSessionManager(
     private fun sendHI() {
         val hiJson = JSONObject().apply {
             put("userId", pendingUserId)
-            put("token", jwtToken ?: "")
+            put("accessToken", jwtToken ?: "")
             put("deviceType", "android")
             put("pushToken", appConfig.gmsToken)
             put("deviceId", Constants.getUUIDByMyId(context))
         }
         val hiBody = hiJson.toString().toByteArray(Charsets.UTF_8)
-        Log.d(TAG, "Sending Binary HI frame: $hiJson")
+        Log.i(TAG, "[NeoHS 3/4] HI 전송 → userId=${pendingUserId}, hasToken=${jwtToken != null}, pushToken=${appConfig.gmsToken?.take(10)}...")
+        FileLogger.log(TAG, "[NeoHS 3/4] HI 전송 → userId=${pendingUserId} hasToken=${jwtToken != null}")
         binarySocketClient?.sendFrame(ProtocolCommand.HI.code, hiBody)
 
         // HI watchdog — 서버가 TCP FIN 없이 drop 하는 경우 hiCompletedDeferred 가 영원히 pending 상태로 남는 걸 방지.
@@ -244,35 +249,30 @@ class SocketSessionManager(
     private fun handleHIResponse(frame: BinaryFrameCodec.BinaryFrame) {
         try {
             val bodyStr = frame.bodyAsString()
-            Log.d(TAG, "Binary HI response raw: $bodyStr")
+            Log.i(TAG, "[NeoHS] HI response raw: $bodyStr")
             val json = JSONObject(bodyStr)
             val errorCode = json.optInt("errorCode", -1)
 
             if (errorCode == 0) {
-                val userInfoObj = json.optJSONObject("userInfo")
-                val nick = json.optString("nick", "")
-
-                // HI 응답에서 갱신된 토큰 저장
-                // optString 으로 필드 누락·JSON null·빈 문자열 모두 "" 처리 (JSONException 방지)
                 val newToken: String? = json.optString("accessToken", "")
                     .ifEmpty { json.optString("token", "") }
                     .ifEmpty { null }
                 val newRefreshToken: String? = json.optString("refreshToken", "").ifEmpty { null }
                 if (!newToken.isNullOrEmpty()) {
                     updateTokens(newToken, newRefreshToken)
-                    Log.d(TAG, "HI response - tokens updated in EncryptedSharedPreferences")
                 }
                 if (!jwtTokenDeferred.isCompleted) jwtTokenDeferred.complete(jwtToken)
                 if (!hiCompletedDeferred.isCompleted) hiCompletedDeferred.complete(Unit)
-                Log.d(TAG, "HI success - userInfo=$userInfoObj, nick=$nick, jwt=${jwtToken != null}")
+                Log.i(TAG, "[NeoHS 4/4] HI 성공 ✓ tokenRefreshed=${newToken != null}")
+                FileLogger.log(TAG, "[NeoHS 4/4] HI 성공 ✓ tokenRefreshed=${newToken != null}")
 
                 // LoggedIn 상태 발행
                 val userJson = restLoginUserJson ?: JSONObject().apply {
                     put("errorCode", 0)
-                    put("userId", userInfoObj?.optString("userId", pendingUserId ?: "") ?: pendingUserId ?: "")
-                    put("userInfo", userInfoObj ?: JSONObject())
+                    put("userId", pendingUserId ?: "")
+                    put("userInfo", JSONObject())
                 }.toString()
-                val userName = pendingUserId ?: userInfoObj?.optString("userName", "") ?: ""
+                val userName = pendingUserId ?: ""
                 _loginState.tryEmit(LoginState.LoggedIn(userName, userJson, emptyMap()))
 
                 // TIME_REQUEST 전송
@@ -282,7 +282,8 @@ class SocketSessionManager(
                 hiCompletedListeners.forEach { it() }
             } else {
                 val msg = json.optString("errorMessage", "HI 실패")
-                Log.w(TAG, "HI failed: $msg")
+                Log.w(TAG, "[NeoHS 4/4] HI 실패 ✗ errorCode=$errorCode, msg=$msg")
+                FileLogger.log(TAG, "[NeoHS 4/4] HI 실패 ✗ errorCode=$errorCode msg=$msg")
 
                 // 토큰 만료로 HI 실패 시 → JWT만 클리어 (refreshToken은 REST 재인증용으로 보존)
                 if (msg.contains("Invalid") || msg.contains("expired") || msg.contains("token", ignoreCase = true)) {
@@ -419,6 +420,7 @@ class SocketSessionManager(
                 binarySocketClient!!.connect()
             } catch (e: Exception) {
                 Log.e(TAG, "Reconnect failed: ${e.message}")
+                FileLogger.log(TAG, "Reconnect FAILED ${e.javaClass.simpleName}: ${e.message} → retry in ${(reconnectDelaySec * 2).coerceAtMost(60)}s")
                 isReconnecting.set(false)
                 reconnectDelaySec = (reconnectDelaySec * 2).coerceAtMost(60)
                 scheduleReconnect()
@@ -535,6 +537,10 @@ class SocketSessionManager(
             reconnectDelaySec = (reconnectDelaySec * 2).coerceAtMost(60)
             scheduleReconnect()
         }
+
+        override fun onRawJsonFrame(json: String) {
+            routeRawJsonFrame(json)
+        }
     }
 
     fun cancelReconnect() {
@@ -601,6 +607,7 @@ class SocketSessionManager(
             val command = ProtocolCommand.fromCode(frame.commandCode)
             if (command != ProtocolCommand.NOOP) {
                 Log.d(TAG, "Binary frame received: cmd=${command?.protocol ?: "0x${frame.commandCode.toString(16)}"}, invokeId=${frame.invokeId}")
+                FileLogger.log(TAG, "Binary frame recv: cmd=${command?.protocol ?: "0x${frame.commandCode.toString(16)}"} invokeId=${frame.invokeId}")
             }
 
             // 내부 핸들러
@@ -627,6 +634,7 @@ class SocketSessionManager(
 
         override fun onDisconnected() {
             Log.d(TAG, "Binary socket disconnected")
+            FileLogger.log(TAG, "Binary socket DISCONNECTED")
             binarySocketClient = null
             loginSessionScope?.cancel()
             loginSessionScope = null
@@ -635,7 +643,31 @@ class SocketSessionManager(
 
         override fun onError(error: Throwable) {
             Log.e(TAG, "Binary socket error: ${error.message}")
+            FileLogger.log(TAG, "Binary socket ERROR ${error.javaClass.simpleName}: ${error.message}")
             _loginState.tryEmit(LoginState.Failed("소켓 오류: ${error.message}"))
         }
+
+        override fun onRawJsonFrame(json: String) {
+            routeRawJsonFrame(json)
+        }
+    }
+
+    /**
+     * raw JSON 프레임 라우팅:
+     * `command` 필드가 알려진 ProtocolCommand이면 frameHandlers로 직접 전달 (기존 push 처리 로직 재사용).
+     * 알 수 없는 command이면 onRawSocketJson으로 fallback.
+     */
+    private fun routeRawJsonFrame(json: String) {
+        try {
+            val obj = JSONObject(json)
+            val commandName = obj.optString("command", "")
+            val cmd = if (commandName.isNotEmpty()) ProtocolCommand.fromName(commandName) else null
+            if (cmd != null) {
+                val frame = BinaryFrameCodec.BinaryFrame(cmd.code, 0, json.toByteArray(Charsets.UTF_8))
+                frameHandlers[cmd.code]?.invoke(frame) ?: Log.d(TAG, "No handler for raw JSON command: $commandName")
+            } else {
+                onRawSocketJson?.invoke(obj)
+            }
+        } catch (_: Exception) {}
     }
 }

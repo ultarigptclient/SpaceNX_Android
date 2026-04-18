@@ -70,6 +70,21 @@ class PushEventRouter(
 
                         val myUserId = appConfig.getSavedUserId() ?: ""
 
+                        // ModThreadEvent ADD_COMMENT/DELETE_COMMENT: 서버가 chatCode=null로 보냄 → DB에서 보강
+                        if (cmd == ProtocolCommand.MOD_THREAD_EVENT) {
+                            val et = data.optString("eventType", "")
+                            if ((et == "ADD_COMMENT" || et == "DELETE_COMMENT") && data.isNull("chatCode")) {
+                                val tc = data.optString("threadCode", "")
+                                if (tc.isNotEmpty()) {
+                                    val td = loginViewModel.projectRepo.getChatThreadByCode(tc)
+                                    val cc = td?.get("chatCode") as? String
+                                    if (!cc.isNullOrEmpty()) {
+                                        data.put("chatCode", cc)
+                                    }
+                                }
+                            }
+                        }
+
                         // ICON_EVENT는 presence 전용 경로로 전달 — forwardPushToReact 스킵
                         if (cmd != ProtocolCommand.ICON_EVENT) {
                             bridgeDispatcher.forwardPushToReact(cmd.protocol, data)
@@ -103,7 +118,7 @@ class PushEventRouter(
                             bridgeDispatcher.notifyReact("channelReady")
                         }
 
-                        // Org 이벤트 → delta sync + orgReady
+                        // Org 이벤트 → delta sync + orgReady + buddyReady
                         if (cmd == ProtocolCommand.ORG_USER_EVENT ||
                             cmd == ProtocolCommand.ORG_DEPT_EVENT ||
                             cmd == ProtocolCommand.ORG_USER_REMOVED_EVENT ||
@@ -116,19 +131,42 @@ class PushEventRouter(
                                 }
                             }
                             bridgeDispatcher.notifyReact("orgReady")
+                            bridgeDispatcher.notifyReact("buddyReady")
                         }
 
-                        // Project/Issue/Thread/Cal/Todo 이벤트 → projectReady
+                        // Project/Issue/Thread 이벤트 → projectReady
                         if (cmd == ProtocolCommand.MOD_ISSUE_EVENT ||
                             cmd == ProtocolCommand.MOD_PROJECT_EVENT ||
                             cmd == ProtocolCommand.MOD_THREAD_EVENT ||
-                            cmd == ProtocolCommand.MOD_CAL_EVENT ||
-                            cmd == ProtocolCommand.MOD_TODO_EVENT ||
                             cmd == ProtocolCommand.CREATE_CHAT_THREAD_EVENT ||
                             cmd == ProtocolCommand.DELETE_CHAT_THREAD_EVENT ||
                             cmd == ProtocolCommand.ADD_COMMENT_EVENT ||
                             cmd == ProtocolCommand.DELETE_COMMENT_EVENT) {
                             bridgeDispatcher.notifyReact("projectReady")
+                        }
+
+                        // ModCalEvent → delta sync + calReady
+                        if (cmd == ProtocolCommand.MOD_CAL_EVENT) {
+                            scope.launch {
+                                try {
+                                    bridgeDispatcher.projectRepo.syncCalendar()
+                                } catch (e: Exception) {
+                                    Log.w(TAG, "syncCalendar on ModCalEvent failed: ${e.message}")
+                                }
+                                bridgeDispatcher.notifyReactOnce("calReady")
+                            }
+                        }
+
+                        // ModTodoEvent → delta sync + todoReady
+                        if (cmd == ProtocolCommand.MOD_TODO_EVENT) {
+                            scope.launch {
+                                try {
+                                    bridgeDispatcher.projectRepo.syncTodo()
+                                } catch (e: Exception) {
+                                    Log.w(TAG, "syncTodo on ModTodoEvent failed: ${e.message}")
+                                }
+                                bridgeDispatcher.notifyReactOnce("todoReady")
+                            }
                         }
 
                         // ADD_COMMENT / DELETE_COMMENT → threadReady (말풍선 답글 배지)
@@ -141,19 +179,39 @@ class PushEventRouter(
                             if (threadCode.isNotEmpty()) {
                                 val threadData = loginViewModel.projectRepo.getChatThreadByCode(threadCode)
                                 if (threadData != null) {
+                                    // commentCount는 이벤트 값 우선 (DB 반영 전일 수 있음)
+                                    val count = if (!data.isNull("commentCount")) data.optInt("commentCount")
+                                                else threadData["commentCount"] as? Int ?: 0
                                     val json = JSONObject()
                                         .put("event", "threadReady")
                                         .put("channelCode", threadData["channelCode"])
                                         .put("chatCode", threadData["chatCode"])
-                                        .put("commentCount", threadData["commentCount"])
+                                        .put("commentCount", count)
                                         .toString()
-                                    bridgeDispatcher.evalJs(
+                                    // evalJsMain: 서브 WebView(스레드 패널) 열려있어도 채팅 버블이 있는 메인 WebView로 전송
+                                    bridgeDispatcher.evalJsMain(
                                         "window.postMessage('${bridgeDispatcher.esc(json)}')"
                                     )
                                 } else {
-                                    bridgeDispatcher.notifyReact("threadReady")
+                                    // DB에 스레드 없음 — channelCode + commentCount만으로 threadReady 전달
+                                    val channelCode = data.optString("channelCode", "")
+                                    if (channelCode.isNotEmpty()) {
+                                        val json = JSONObject()
+                                            .put("event", "threadReady")
+                                            .put("channelCode", channelCode)
+                                            .put("threadCode", threadCode)
+                                            .put("commentCount", data.optInt("commentCount", 0))
+                                            .toString()
+                                        bridgeDispatcher.evalJsMain(
+                                            "window.postMessage('${bridgeDispatcher.esc(json)}')"
+                                        )
+                                    } else {
+                                        bridgeDispatcher.notifyReact("threadReady")
+                                    }
                                 }
                             }
+                            // chatReady도 함께 발행: React가 채널 chat list를 refresh하여 thread 뱃지 JOIN 재평가
+                            bridgeDispatcher.notifyReactOnce("chatReady")
                         }
 
                         // setConfig push → FRONTEND_VERSION/SKIN URL 변경
@@ -171,10 +229,24 @@ class PushEventRouter(
                         when (cmd) {
                             ProtocolCommand.SEND_CHAT_EVENT -> {
                                 val sid = data.optString("sendUserId", "")
-                                if (sid != myUserId) {
+                                // 채널이 로컬에 없고 SYSTEM 메시지(입장/퇴장/초대)면 배너 skip —
+                                // 방 생성은 MakeChannel/AddMember 이벤트가 담당. 해당 이벤트가 먼저
+                                // 도착하지 않은 순간에 고아 SYSTEM 메시지로 배너가 뜨는 것을 방지.
+                                val rawChatType = data.opt("chatType")
+                                val isSystemChat = rawChatType == "SYSTEM" || rawChatType == "system" ||
+                                    (rawChatType is Number && rawChatType.toInt() == 6)
+                                val chCode = data.optString("channelCode", "")
+                                val channelMissing = if (isSystemChat && chCode.isNotEmpty()) {
+                                    try {
+                                        databaseProvider.getChatDatabase().channelDao().getByChannelCode(chCode) == null
+                                    } catch (_: Exception) { false }
+                                } else false
+                                if (channelMissing) {
+                                    Log.d(TAG, "SendChatEvent banner skipped: missing channel $chCode for SYSTEM msg")
+                                } else if (sid != myUserId) {
                                     showPushNotification(
                                         Constants.TYPE_TALK,
-                                        data.optString("channelCode", ""),
+                                        chCode,
                                         data.optString("sendUserName", sid),
                                         data.optString("contents", ""),
                                         data.optInt("chatType", 0)
@@ -203,6 +275,42 @@ class PushEventRouter(
                     } catch (e: Exception) {
                         Log.e(TAG, "Push handle error: ${e.message}")
                     }
+                }
+            }
+        }
+
+        // 소켓으로 수신된 raw JSON 알림 (FCM 포맷과 동일, 바이너리 헤더 없이 전달)
+        sm.onRawSocketJson = { json ->
+            scope.launch {
+                try {
+                    val messageType = json.optString("messageType", "").uppercase()
+                    val key = json.optString("key", "").takeIf { it.isNotEmpty() && it != "null" } ?: ""
+                    val senderId = json.optString("id", "").takeIf { it != "null" } ?: ""
+                    val name = json.optString("name", "").takeIf { it != "null" } ?: ""
+                    val comm = json.optString("comm", "")
+                    Log.d(TAG, "Raw socket JSON: type=$messageType, key=$key, sender=$senderId")
+
+                    when (messageType) {
+                        "CHAT" -> {
+                            if (key.isNotEmpty() && key != bridgeDispatcher.activeChannelCode) {
+                                bridgeDispatcher.notifyReactOnce("chatReady")
+                                bridgeDispatcher.notifyReactOnce("channelReady")
+                                val resolvedName = name.ifEmpty {
+                                    if (senderId.isNotEmpty()) loginViewModel.userNameCache.resolve(senderId) else ""
+                                }
+                                showPushNotification(Constants.TYPE_TALK, key, resolvedName, preprocessContent(comm))
+                            }
+                        }
+                        "MESSAGE", "MSG" -> {
+                            bridgeDispatcher.notifyReact("messageReady")
+                            val resolvedName = name.ifEmpty {
+                                if (senderId.isNotEmpty()) loginViewModel.userNameCache.resolve(senderId) else "쪽지 수신"
+                            }
+                            showPushNotificationGeneric(Constants.TYPE_MESSAGE, "MSG", resolvedName, preprocessContent(comm), senderId)
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "Raw socket JSON handle error: ${e.message}")
                 }
             }
         }
@@ -245,6 +353,7 @@ class PushEventRouter(
         contents: String,
         chatType: Int = 0
     ) {
+        if (!isAppInForeground()) return  // 백그라운드 시스템 알림은 FCM이 단독 처리
         if (channelCode == bridgeDispatcher.activeChannelCode) {
             Log.d(TAG, "showPushNotification: suppressed (active channel)")
             return
@@ -253,38 +362,30 @@ class PushEventRouter(
             Log.d(TAG, "showPushNotification: muted channel $channelCode")
             return
         }
-        if (isAppInForeground()) {
-            activity.runOnUiThread {
-                inAppBanner.show(senderName.ifEmpty { "새 메시지" }, preprocessContent(contents), channelCode) {
-                    navigateToChannel(channelCode)
-                }
+        activity.runOnUiThread {
+            inAppBanner.show(senderName.ifEmpty { "새 메시지" }, preprocessContent(contents), channelCode) {
+                navigateToChannel(channelCode)
             }
-            Log.d(TAG, "showPushNotification: in-app banner shown")
-        } else {
-            notificationGroupManager.showNotify(type, channelCode, senderName, preprocessContent(contents), null)
-            Log.d(TAG, "showPushNotification: system notification shown")
         }
+        Log.d(TAG, "showPushNotification: in-app banner shown")
     }
 
     fun showPushNotificationGeneric(type: String, key: String, senderName: String, contents: String, senderId: String = "") {
-        if (isAppInForeground()) {
-            activity.runOnUiThread {
-                val title = when (type) {
-                    Constants.TYPE_MESSAGE -> "쪽지: $senderName"
-                    Constants.TYPE_SYSTEM_NOTIFY -> "알림"
-                    else -> senderName.ifEmpty { "알림" }
-                }
-                inAppBanner.show(title, preprocessContent(contents), key) {
-                    when (type) {
-                        Constants.TYPE_MESSAGE ->
-                            bridgeDispatcher.evalJs("window.dispatchEvent(new CustomEvent('neoNavigate',{detail:{nav:'message'}}))")
-                        Constants.TYPE_SYSTEM_NOTIFY ->
-                            bridgeDispatcher.evalJs("window.dispatchEvent(new CustomEvent('neoNavigate',{detail:{nav:'noti'}}))")
-                    }
+        if (!isAppInForeground()) return  // 백그라운드 시스템 알림은 FCM이 단독 처리
+        activity.runOnUiThread {
+            val title = when (type) {
+                Constants.TYPE_MESSAGE -> "쪽지: $senderName"
+                Constants.TYPE_SYSTEM_NOTIFY -> "알림"
+                else -> senderName.ifEmpty { "알림" }
+            }
+            inAppBanner.show(title, preprocessContent(contents), key) {
+                when (type) {
+                    Constants.TYPE_MESSAGE ->
+                        bridgeDispatcher.evalJs("window.dispatchEvent(new CustomEvent('neoNavigate',{detail:{nav:'message'}}))")
+                    Constants.TYPE_SYSTEM_NOTIFY ->
+                        bridgeDispatcher.evalJs("window.dispatchEvent(new CustomEvent('neoNavigate',{detail:{nav:'noti'}}))")
                 }
             }
-        } else {
-            notificationGroupManager.showNotify(type, key, senderName, preprocessContent(contents), null, null, senderId)
         }
     }
 }

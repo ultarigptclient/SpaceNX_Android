@@ -26,15 +26,20 @@ class AppHandler(
         val needLogin = ctx.activity.needLogin()
 
         if (!needLogin && ctx.activity.isAutoLogin) {
-            Log.d(TAG, "getClientState: autoLogin in progress, rejecting (Flutter pattern)")
-            ctx.rejectToJs("getClientState", "autoLogin in progress")
+            Log.d(TAG, "getClientState: autoLogin in progress, responding needLogin=false")
+            val result = JSONObject().apply {
+                put("needPrivacy", !ctx.activity.privacyPolicy())
+                put("needPermission", ctx.activity.needPermission())
+                put("needLogin", false)
+            }
+            ctx.resolveToJs("getClientState", result)
             return
         }
 
         if (needLogin) {
             // 토큰 없음 → localStorage 인증 캐시 제거 (이전 세션 캐시로 메인화면이 뜨는 것 방지)
             Log.d(TAG, "getClientState: needLogin=true, clearing localStorage auth cache")
-            ctx.evalJs("localStorage.removeItem('nx_auth'); localStorage.removeItem('isLoggedIn'); localStorage.removeItem('currentUser')")
+            ctx.evalJs("try{localStorage.removeItem('nx_auth');localStorage.removeItem('isLoggedIn');localStorage.removeItem('currentUser');}catch(e){}")
         }
 
         val result = JSONObject().apply {
@@ -186,6 +191,24 @@ class AppHandler(
         }
     }
 
+    // ── QUIC 설정 ──
+
+    fun handleGetQuicSetting() {
+        val result = JSONObject().apply {
+            put("errorCode", 0)
+            put("enabled", ctx.appConfig.isQuicEnabled())
+            put("port", ctx.appConfig.getQuicPort())
+        }
+        ctx.resolveToJs("getQuicSetting", result)
+    }
+
+    fun handleSetQuicSetting(params: Map<String, Any?>) {
+        val enabled = params["enabled"] as? Boolean ?: false
+        ctx.appConfig.setQuicEnabled(enabled)
+        Log.d(TAG, "setQuicSetting: enabled=$enabled")
+        ctx.resolveToJs("setQuicSetting", JSONObject().put("errorCode", 0))
+    }
+
     fun handleOpenWindow(params: Map<String, Any?>) {
         val type = ctx.paramStr(params, "type")
         val channelCode = ctx.paramStr(params, "channelCode")
@@ -280,6 +303,7 @@ class AppHandler(
             put("loginUserId", ctx.appConfig.getSavedUserId() ?: "")
         }
         (ctx as? net.spacenx.messenger.ui.bridge.BridgeDispatcher)?.pendingPopupContext = popupCtx
+        ctx.activity.pendingSubWebViewContext = popupCtx.toString()
 
         val userIdsJson = org.json.JSONArray(idList).toString()
         val encodedIds = android.net.Uri.encode(userIdsJson)
@@ -315,7 +339,10 @@ class AppHandler(
 
         suspend fun tryRest(): Boolean {
             return try {
-                val body = ctx.paramsToJson(params)
+                val body = ctx.paramsToJson(params).apply {
+                    if (!has("userId") || optString("userId").isEmpty())
+                        put("userId", ctx.appConfig.getSavedUserId() ?: "")
+                }
                 val token = ctx.appConfig.getSavedToken()
                 val result = withContext(Dispatchers.IO) {
                     ApiClient.postJson(ctx.appConfig.getEndpointByPath("/status/setpresence"), body, token)
@@ -354,7 +381,9 @@ class AppHandler(
             ctx.appConfig.saveMyStatusCode(statusCode)
             val userId = ctx.appConfig.getSavedUserId() ?: ""
             if (userId.isNotEmpty()) {
-                val presenceJson = """{"users":[{"userId":"$userId","icon":$statusCode}]}"""
+                val nick = ctx.appConfig.getMyNick()
+                val nickField = if (nick.isNotEmpty()) ""","nick":"${ctx.esc(nick)}"""" else ""
+                val presenceJson = """{"users":[{"userId":"$userId","icon":$statusCode$nickField}]}"""
                 Log.d("Presence", "[2] self→React: $presenceJson")
                 ctx.evalJs("window._onPresenceUpdate && window._onPresenceUpdate('${ctx.esc(presenceJson)}')")
             }
@@ -375,7 +404,9 @@ class AppHandler(
             if (nick.isNotEmpty()) ctx.appConfig.saveMyNick(nick)
             val userId = ctx.appConfig.getSavedUserId() ?: ""
             if (nick.isNotEmpty() && userId.isNotEmpty()) {
-                val nickJson = """{"users":[{"userId":"$userId","command":"Nick","nick":"${ctx.esc(nick)}"}]}"""
+                val icon = ctx.appConfig.getMyStatusCode()
+                val iconField = if (icon > 0) ""","icon":$icon""" else ""
+                val nickJson = """{"users":[{"userId":"$userId","command":"Nick","nick":"${ctx.esc(nick)}"$iconField}]}"""
                 Log.d(TAG, "setNick self→React: $nickJson")
                 ctx.evalJs("window._onPresenceUpdate && window._onPresenceUpdate('${ctx.esc(nickJson)}')")
             }
@@ -388,6 +419,12 @@ class AppHandler(
         Log.d(TAG, "uploadProfilePhoto params: $params")
         try {
             val fileObj = params["file"]
+            val nativeTempId = when (fileObj) {
+                is JSONObject -> fileObj.optString("nativeTempId", fileObj.optString("_nativeTempId", ""))
+                is Map<*, *> -> fileObj["nativeTempId"]?.toString() ?: fileObj["_nativeTempId"]?.toString() ?: ""
+                is String -> try { JSONObject(fileObj).let { it.optString("nativeTempId", it.optString("_nativeTempId", "")) } } catch (_: Exception) { "" }
+                else -> ""
+            }
             val fileUrl = when (fileObj) {
                 is JSONObject -> fileObj.optString("url", "")
                 is Map<*, *> -> fileObj["url"]?.toString() ?: ""
@@ -395,19 +432,30 @@ class AppHandler(
                 else -> ""
             }
             val userId = ctx.appConfig.getSavedUserId() ?: ""
-            if (fileUrl.isEmpty() || userId.isEmpty()) {
-                ctx.rejectToJs("uploadProfilePhoto", "Missing fileUrl or userId")
+            if (userId.isEmpty()) {
+                ctx.rejectToJs("uploadProfilePhoto", "Missing userId")
                 return
             }
             val token = ctx.appConfig.getSavedToken()
             val result = withContext(Dispatchers.IO) {
-                val origin = ctx.appConfig.getRestBaseUrl().replace(Regex("/api$"), "")
-                val fullUrl = if (fileUrl.startsWith("http")) fileUrl else "$origin$fileUrl"
-                Log.d(TAG, "uploadProfilePhoto: downloading from $fullUrl")
-                val imageBytes = ApiClient.downloadBytes(fullUrl, token)
-                Log.d(TAG, "uploadProfilePhoto: downloaded ${imageBytes.size} bytes, uploading")
                 val photoUploadUrl = ctx.appConfig.getEndpointByPath("/media/photo/upload")
-                ApiClient.uploadProfilePhoto(photoUploadUrl, imageBytes, userId, token)
+                if (nativeTempId.isNotEmpty()) {
+                    val tempFile = java.io.File(java.io.File(ctx.activity.cacheDir, "pickedFiles"), nativeTempId)
+                    if (!tempFile.exists()) throw Exception("Temp file not found: $nativeTempId")
+                    Log.d(TAG, "uploadProfilePhoto: uploading from tempFile ${tempFile.length()}B")
+                    val imageBytes = tempFile.readBytes()
+                    try { tempFile.delete() } catch (_: Exception) {}
+                    ApiClient.uploadProfilePhoto(photoUploadUrl, imageBytes, userId, token)
+                } else if (fileUrl.isNotEmpty()) {
+                    val origin = ctx.appConfig.getRestBaseUrl().replace(Regex("/api$"), "")
+                    val fullUrl = if (fileUrl.startsWith("http")) fileUrl else "$origin$fileUrl"
+                    Log.d(TAG, "uploadProfilePhoto: downloading from $fullUrl")
+                    val imageBytes = ApiClient.downloadBytes(fullUrl, token)
+                    Log.d(TAG, "uploadProfilePhoto: downloaded ${imageBytes.size} bytes, uploading")
+                    ApiClient.uploadProfilePhoto(photoUploadUrl, imageBytes, userId, token)
+                } else {
+                    throw Exception("Missing nativeTempId or fileUrl")
+                }
             }
             Log.d(TAG, "uploadProfilePhoto response: $result")
             try {

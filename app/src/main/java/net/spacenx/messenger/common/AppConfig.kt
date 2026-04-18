@@ -304,7 +304,7 @@ class AppConfig(private val context: Context) {
     // ── 본인 Presence 상태 ──
 
     fun saveMyStatusCode(statusCode: Int) {
-        devicePrefs.edit().putInt("myStatusCode", statusCode).apply()
+        devicePrefs.edit().putInt("myStatusCode", statusCode).commit()  // commit() 동기 — apply() 비동기면 앱 강제종료 시 이전 값이 살아남음
     }
 
     fun getMyStatusCode(): Int = devicePrefs.getInt("myStatusCode", 0)

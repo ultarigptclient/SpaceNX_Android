@@ -8,7 +8,6 @@ import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import net.spacenx.messenger.data.repository.AuthRepository
@@ -64,14 +63,13 @@ class LoginViewModel @Inject constructor(
     val loginState: StateFlow<LoginState> = sessionService.loginState
     val subscribeResponse = pubSubRepo.subscribeResponse
 
-    // SyncService 이벤트 위임
-    val orgListReady: SharedFlow<String> get() = syncService.orgListReady
-    val buddyListReady: SharedFlow<String> get() = syncService.buddyListReady
-
     // SyncService deferred 위임 (BridgeDispatcher가 await)
     val syncBuddyDeferred get() = syncService.syncBuddyDeferred
     val syncChannelDeferred get() = syncService.syncChannelDeferred
     val syncChatDeferred get() = syncService.syncChatDeferred
+
+    /** OrgHandler에서 중복 syncBuddy 방지용 — 마지막 초기 sync 완료 시각 */
+    val lastBuddySyncMs: Long get() = syncService.lastBuddySyncMs
 
     private var loginJob: Job? = null
 

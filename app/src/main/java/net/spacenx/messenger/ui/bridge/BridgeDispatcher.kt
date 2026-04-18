@@ -113,8 +113,28 @@ class BridgeDispatcher(
         // Presence push → WebView
         scope.launch {
             pubSubRepo.publishEvent.collect { json ->
-                Log.d("Presence", "[5] PUBLISH→React: $json")
-                val wrapped = """{"users":[$json]}"""
+                // Self PUBLISH: fill in missing nick/icon so React doesn't clear them
+                val enriched = try {
+                    val obj = org.json.JSONObject(json)
+                    val myId = appConfig.getSavedUserId()
+                    if (obj.optString("userId") == myId) {
+                        val cmd = obj.optString("command")
+                        if (cmd == "Icon") {
+                            val nick = appConfig.getMyNick()
+                            if (nick.isNotEmpty()) obj.put("nick", nick)
+                            val newIcon = obj.optInt("icon", -1)
+                            if (newIcon >= 0) appConfig.saveMyStatusCode(newIcon)
+                        } else if (cmd == "Nick") {
+                            val icon = appConfig.getMyStatusCode()
+                            obj.put("icon", icon)
+                            val newNick = obj.optString("nick")
+                            if (newNick.isNotEmpty()) appConfig.saveMyNick(newNick)
+                        }
+                    }
+                    obj.toString()
+                } catch (_: Exception) { json }
+                Log.d("Presence", "[5] PUBLISH→React: $enriched")
+                val wrapped = """{"users":[$enriched]}"""
                 evalJs("window._onPresenceUpdate && window._onPresenceUpdate('${esc(wrapped)}')")
             }
         }
@@ -157,7 +177,8 @@ class BridgeDispatcher(
                 // ── 조직도 + 내목록 + 버디 관리 ──
                 "getOrgList", "getOrgSubList", "searchUsers", "openUserDetail",
                 "syncBuddy", "addUserToMyList", "getMyPart",
-                "addBuddy", "removeBuddy"
+                "addBuddy", "removeBuddy",
+                "addBuddyGroup", "deleteBuddyGroup", "renameBuddyGroup", "createSubGroup"
                     -> scope.launch { orgHandler.handle(action, params) }
 
                 // ── 채널 관리 ──
@@ -220,6 +241,10 @@ class BridgeDispatcher(
                 "getUserConfig" -> scope.launch { appHandler.handleGetUserConfig(params) }
                 "setUserConfig" -> scope.launch { appHandler.handleSetUserConfig(params) }
 
+                // ── QUIC 전송 설정 ──
+                "getQuicSetting" -> appHandler.handleGetQuicSetting()
+                "setQuicSetting" -> appHandler.handleSetQuicSetting(params)
+
                 // ── 회의 ──
                 "joinConference" -> scope.launch { channelActionHandler.handle(action, params) }
                 "listConference" -> scope.launch { handleRestForward("listConference", "/comm/listconference", params) }
@@ -253,10 +278,10 @@ class BridgeDispatcher(
                 // ── 프로젝트/스레드 sync ──
                 "syncThread" -> scope.launch {
                     try {
-                        withContext(Dispatchers.IO) { projectRepo.syncThread() }
                         val limit = paramInt(params, "limit", 50)
                         val offset = paramInt(params, "offset", 0)
                         // Flutter와 동일: {errorCode:0, events:[{eventType, threadCode, chatCode, ...}], hasMore}
+                        // delta sync는 SyncService에서 완료 후 threadReady 발행 — 여기서 중복 호출 불필요
                         val result = withContext(Dispatchers.IO) {
                             projectRepo.getAllThreadsAsEvents(limit, offset)
                         }
@@ -432,9 +457,23 @@ class BridgeDispatcher(
                     resolveToJs("getPopupContext", ctx)
                 }
 
-                // ── 버디 그룹 관리 / 채팅 내보내기 / 채팅방 알림 (서버 경로 미확인 — stub) ──
-                "addBuddyGroup", "deleteBuddyGroup", "createSubGroup", "renameBuddyGroup",
-                "exportChat", "setRoomNotification" -> scope.launch {
+                // ── 채팅방 알림 ON/OFF ──
+                "setRoomNotification" -> scope.launch {
+                    val channelCode = paramStr(params, "channelCode")
+                    val on = params["on"]?.toString()?.lowercase() != "false"
+                    if (channelCode.isNotEmpty()) {
+                        if (on) appConfig.unmuteChannel(channelCode)
+                        else appConfig.muteChannel(channelCode)
+                        Log.d(TAG, "setRoomNotification: channelCode=$channelCode on=$on")
+                        resolveToJs(action, JSONObject().put("errorCode", 0))
+                        notifyReact("channelReady")
+                    } else {
+                        resolveToJs(action, JSONObject().put("errorCode", 0))
+                    }
+                }
+
+                // ── 채팅 내보내기 (stub) ──
+                "exportChat" -> scope.launch {
                     Log.d(TAG, "$action: not yet implemented on Android, resolving OK")
                     resolveToJs(action, JSONObject().put("errorCode", 0))
                 }
@@ -497,6 +536,21 @@ class BridgeDispatcher(
         completedSyncs.add(event)
         val json = JSONObject().put("event", event).toString()
         evalJsMain("window.postMessage('${esc(json)}')")
+    }
+
+    /**
+     * 재연결 시 이전 세션에서 pending 상태로 남은 sync 콜백을 즉시 reject.
+     * Disconnect 감지 후 새 sync 콜백이 등록되기 전에 호출해야 한다.
+     */
+    fun flushStaleSyncCallbacks() {
+        val errJson = esc("""{"errorCode":-1,"errorMessage":"reconnecting"}""")
+        listOf("syncNoti", "syncMessage", "syncChannel", "syncBuddy", "syncThread").forEach { action ->
+            evalJsMain(
+                "(function(){var r=window._${action}Reject;" +
+                "window._${action}Resolve=null;window._${action}Reject=null;" +
+                "if(typeof r==='function')r('$errJson');})()"
+            )
+        }
     }
 
     /** React에 일회성 이벤트 전송 (completedSyncs에 추가 안함) — 항상 메인 WebView */
@@ -589,15 +643,17 @@ class BridgeDispatcher(
         }
     }
 
-    override suspend fun saveChannelLocally(channelCode: String, members: List<String>, type: String) {
+    override suspend fun saveChannelLocally(channelCode: String, members: List<String>, type: String, channelName: String) {
         val now = System.currentTimeMillis()
         val state = if (members.size > 2) 1 else 0  // PRIVATE_CHAT=0, GROUP_CHAT=1
         dbProvider.getChatDatabase().channelDao()?.insert(
-            ChannelEntity(channelCode = channelCode, channelType = type, state = state, lastChatDate = now)
+            ChannelEntity(channelCode = channelCode, channelType = type, channelName = channelName, state = state, lastChatDate = now)
         )
+        // 방금 내가 만든 방: 멤버 registDate 를 0 으로 저장해 pre-join 필터가 걸리지 않도록 함.
+        // device/server 시각 차로 sendDate < registDate 가 되는 race 를 회피. 실제 값은 syncChannel 에서 서버값으로 채워짐.
         for (uid in members) {
             dbProvider.getChatDatabase().channelMemberDao()?.insert(
-                ChannelMemberEntity(channelCode = channelCode, userId = uid, registDate = now)
+                ChannelMemberEntity(channelCode = channelCode, userId = uid, registDate = 0L)
             )
         }
     }
