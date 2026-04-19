@@ -236,6 +236,8 @@ class HybridWebMessengerFirebaseMessagingService : FirebaseMessagingService() {
                 content.startsWith("[IMPORTANT_CHAT]") -> return
         }
 
+        // HTML 태그 제거는 sendNotification 진입부에서 일괄 수행 (MCU/CHAT/쪽지/시스템 모든 경로 커버).
+
         when (key) {
             "MSG", "MESSAGE" -> sendNotification(Constants.TYPE_MESSAGE, key, userName, content, null, senderId)
             "OTHER" -> { /* silent badge only */ }
@@ -253,23 +255,54 @@ class HybridWebMessengerFirebaseMessagingService : FirebaseMessagingService() {
         }
     }
 
+    /**
+     * FCM 알림 표시용 plain text 변환.
+     *
+     * 서버가 rich-text (`<p style="..."><span>내용</span></p>`) 로 내려주는 경우를 대비.
+     *  1) 모든 HTML 태그(`<...>`) 제거 — 여는/닫는 태그 모두 포함.
+     *  2) `<img>` 만 있는 순수 이미지 메시지면 "[이미지]" 로 대체.
+     *  3) 주요 HTML 엔티티 언이스케이프 (`&amp;` `&lt;` `&gt;` `&quot;` `&#39;` `&nbsp;`).
+     *  4) 태그 제거 후 빈 문자열이면 원본 유지 (의도 파악 불가 상황 방어).
+     */
+    private fun stripHtmlForNotification(raw: String): String {
+        if (raw.isEmpty()) return raw
+        val hadImg = raw.contains("<img", ignoreCase = true)
+        val stripped = raw.replace(Regex("<[^>]*>"), "")
+            .replace("&amp;", "&")
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&quot;", "\"")
+            .replace("&#39;", "'")
+            .replace("&nbsp;", " ")
+            .trim()
+        return when {
+            stripped.isEmpty() && hadImg -> "[이미지]"
+            stripped.isEmpty() -> raw
+            else -> stripped
+        }
+    }
+
     private fun sendNotification(
         type: String,
         key: String,
         userName: String,
-        message: String,
+        rawMessage: String,
         arg: String?,
         senderId: String = ""
     ) {
         Log.d(TAG, "sendNotification type=$type, key=$key, user=$userName")
 
-        if (message.startsWith("[AUTO_DELETE_CHAT]")) return
+        if (rawMessage.startsWith("[AUTO_DELETE_CHAT]")) return
 
         // 포그라운드면 모든 FCM 억제 — 소켓/인앱 경로가 이미 처리함
         if (net.spacenx.messenger.common.AppState.isForeground) {
             Log.d(TAG, "sendNotification: suppressed (foreground) type=$type")
             return
         }
+
+        // 서버가 rich-text HTML (<p style="..."><span>내용</span></p>) 로 내려주는 경우
+        // 알림 본문은 plain text 로. MCU/CHAT/쪽지/시스템 전 경로 공통 처리.
+        val message = stripHtmlForNotification(rawMessage)
 
         when (type) {
             Constants.TYPE_TALK          -> if (!notificationSettings.useNotification("TALK")) return
