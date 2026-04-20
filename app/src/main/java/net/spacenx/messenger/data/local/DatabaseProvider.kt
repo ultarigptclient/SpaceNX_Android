@@ -165,7 +165,7 @@ class DatabaseProvider(private val context: Context) {
 
     @Synchronized
     fun getCommonDatabase(): CommonDatabase {
-        commonDb?.let { if (it.isOpen) return it else safeClose(it, "common.db") }
+        commonDb?.let { return it }
         val dbFile = File(getBaseDir(), "common.db")
         val db = Room.databaseBuilder(context, CommonDatabase::class.java, dbFile.absolutePath)
             .openHelperFactory(openHelperFactory)
@@ -185,7 +185,7 @@ class DatabaseProvider(private val context: Context) {
     @Synchronized
     fun getOrgDatabase(): OrgDatabase {
         val userId = requireUserId()
-        orgDb?.let { if (it.isOpen) return it else safeClose(it, "org.db") }
+        orgDb?.let { return it }
         val dbFile = File(getUserDir(userId), "org.db")
         val db = Room.databaseBuilder(context, OrgDatabase::class.java, dbFile.absolutePath)
             .openHelperFactory(openHelperFactory)
@@ -198,7 +198,7 @@ class DatabaseProvider(private val context: Context) {
     @Synchronized
     fun getChatDatabase(): ChatDatabase {
         val userId = requireUserId()
-        chatDb?.let { if (it.isOpen) return it else safeClose(it, "chat.db") }
+        chatDb?.let { return it }
         val dbFile = File(getUserDir(userId), "chat.db")
         val db = Room.databaseBuilder(context, ChatDatabase::class.java, dbFile.absolutePath)
             .openHelperFactory(openHelperFactory)
@@ -212,7 +212,7 @@ class DatabaseProvider(private val context: Context) {
     @Synchronized
     fun getMessageDatabase(): MessageDatabase {
         val userId = requireUserId()
-        messageDb?.let { if (it.isOpen) return it else safeClose(it, "message.db") }
+        messageDb?.let { return it }
         val dbFile = File(getUserDir(userId), "message.db")
         val db = Room.databaseBuilder(context, MessageDatabase::class.java, dbFile.absolutePath)
             .openHelperFactory(openHelperFactory)
@@ -226,7 +226,7 @@ class DatabaseProvider(private val context: Context) {
     @Synchronized
     fun getNotiDatabase(): NotiDatabase {
         val userId = requireUserId()
-        notiDb?.let { if (it.isOpen) return it else safeClose(it, "noti.db") }
+        notiDb?.let { return it }
         val dbFile = File(getUserDir(userId), "noti.db")
         val db = Room.databaseBuilder(context, NotiDatabase::class.java, dbFile.absolutePath)
             .openHelperFactory(openHelperFactory)
@@ -240,12 +240,15 @@ class DatabaseProvider(private val context: Context) {
     @Synchronized
     fun getProjectDatabase(): ProjectDatabase {
         val userId = requireUserId()
-        projectDb?.let { if (it.isOpen) return it else safeClose(it, "project.db") }
+        projectDb?.let { return it }
         val dbFile = File(getUserDir(userId), "project.db")
         val db = Room.databaseBuilder(context, ProjectDatabase::class.java, dbFile.absolutePath)
             .openHelperFactory(openHelperFactory)
             .setJournalMode(RoomDatabase.JournalMode.TRUNCATE)
-            .addMigrations(ProjectDatabase.MIGRATION_1_2, ProjectDatabase.MIGRATION_2_3, ProjectDatabase.MIGRATION_3_4)
+            .addMigrations(
+                ProjectDatabase.MIGRATION_1_2, ProjectDatabase.MIGRATION_2_3,
+                ProjectDatabase.MIGRATION_3_4, ProjectDatabase.MIGRATION_4_5
+            )
             .build()
         projectDb = db
         return db
@@ -254,7 +257,7 @@ class DatabaseProvider(private val context: Context) {
     @Synchronized
     fun getSettingDatabase(): SettingDatabase {
         val userId = requireUserId()
-        settingDb?.let { if (it.isOpen) return it else safeClose(it, "setting.db") }
+        settingDb?.let { return it }
         val dbFile = File(getUserDir(userId), "setting.db")
         val db = Room.databaseBuilder(context, SettingDatabase::class.java, dbFile.absolutePath)
             .openHelperFactory(openHelperFactory)

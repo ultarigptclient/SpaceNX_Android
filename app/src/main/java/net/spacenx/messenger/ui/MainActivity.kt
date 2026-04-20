@@ -270,7 +270,16 @@ class MainActivity : AppCompatActivity() {
             if (isLoggedIn) {
                 isForegroundResume = true
                 if (loginViewModel.isConnected()) {
-                    Log.d(TAG, "Foreground resume: socket still alive, skipping reconnect/sync")
+                    // 소켓은 살아있지만 백그라운드 동안 일부 push 유실 가능 → 경량 delta 재동기화 1회
+                    Log.d(TAG, "Foreground resume: socket alive, running lightweight delta resync")
+                    val uid = appConfig.getSavedUserId() ?: ""
+                    if (uid.isNotEmpty()) {
+                        loginViewModel.resyncDeltaOnly(
+                            userId = uid,
+                            notifyCallback = { event -> bridgeDispatcher.notifyReact(event) },
+                            projectRepo = bridgeDispatcher.projectRepo
+                        )
+                    }
                     return
                 }
                 reconnectJob?.cancel()
@@ -813,6 +822,18 @@ class MainActivity : AppCompatActivity() {
     fun onHardReload() {
         Log.d(TAG, "onHardReload: resetting isForegroundResume")
         isForegroundResume = false
+        // 로그인 상태면 lastAuthJson을 pendingAuthJson에 복원 → onPageFinished가 즉시 resolve
+        val cached = mainViewModel.lastAuthJson
+        if (cached != null && isLoggedIn) {
+            Log.d(TAG, "onHardReload: restoring pendingAuthJson for instant resolve")
+            pendingAuthJson = cached
+        }
+        // React presence 상태가 초기화되므로 subscription 캐시도 클리어 —
+        // 다음 syncBuddy/getOrgSubList 호출 시 서버 재구독 → 최신 icon/nick 수신
+        if (isLoggedIn) {
+            loginViewModel.pubSubRepo.clearSubscriptions()
+            Log.d(TAG, "onHardReload: cleared presence subscriptions for fresh re-subscribe")
+        }
     }
 
     /** getClientState에서 needLogin=false일 때 호출 — refreshToken으로 자동 로그인 */
@@ -1325,13 +1346,12 @@ class MainActivity : AppCompatActivity() {
                                 u.put("icon", icon)
                                 if (isMe) {
                                     val serverNick = u.optString("nick")
+                                    // AppConfig 저장은 setNick 성공·Nick 소켓 push에서만 수행
+                                    // subscribe 스냅샷은 lag이 있어 stale 덮어쓰기 위험 → 표시용으로만 사용
                                     if (myNick.isNotEmpty()) {
-                                        // 로컬 저장값 우선: REST setNick은 서버 presence 캐시를 즉시 갱신하지 않으므로
-                                        // subscribe 응답의 서버 nick이 구버전일 수 있음. 실시간 변경은 PUBLISH Nick으로 수신.
                                         u.put("nick", myNick)
                                     } else if (serverNick.isNotEmpty()) {
-                                        // 로컬이 비어있을 때만 서버값 채택 (초기 로그인 등)
-                                        appConfig.saveMyNick(serverNick)
+                                        u.put("nick", serverNick)
                                     }
                                 }
                             }

@@ -92,6 +92,8 @@ class AppHandler(
 
     suspend fun handleGetUserConfig(params: Map<String, Any?>) {
         try {
+            // cbId 사용: rapid-fire 시 각 호출이 자신의 콜백 슬롯으로 응답
+            val cbId = ctx.paramStr(params, "cbId").ifEmpty { "getUserConfig" }
             val userId = ctx.appConfig.getSavedUserId() ?: ""
 
             // 로컬 캐시 즉시 반환 (UI 블로킹 방지)
@@ -107,7 +109,7 @@ class AppHandler(
             }
             val cachedSize = cached.optJSONObject("configs")?.length() ?: 0
             Log.d(TAG, "getUserConfig: returning local cache ($cachedSize keys)")
-            ctx.resolveToJs("getUserConfig", cached)
+            ctx.resolveToJs(cbId, cached)
 
             // 백그라운드에서 서버 동기화 → 로컬 캐시 갱신 후 push event (로그인 전이면 skip)
             if (!ctx.dbProvider.isInitialized()) return
@@ -339,9 +341,10 @@ class AppHandler(
 
         suspend fun tryRest(): Boolean {
             return try {
-                val body = ctx.paramsToJson(params).apply {
-                    if (!has("userId") || optString("userId").isEmpty())
-                        put("userId", ctx.appConfig.getSavedUserId() ?: "")
+                // 서버는 {userId, presence} 필드를 요구. JS가 보내는 statusCode 키를 그대로 넘기면 NPE 발생.
+                val body = JSONObject().apply {
+                    put("userId", ctx.appConfig.getSavedUserId() ?: "")
+                    put("presence", statusCode)
                 }
                 val token = ctx.appConfig.getSavedToken()
                 val result = withContext(Dispatchers.IO) {
@@ -381,11 +384,15 @@ class AppHandler(
             ctx.appConfig.saveMyStatusCode(statusCode)
             val userId = ctx.appConfig.getSavedUserId() ?: ""
             if (userId.isNotEmpty()) {
+                // neoPush('Icon') 경로 사용 → _mergePresenceGlobal → mobileIcon 보존
+                val iconMsg = """{"event":"neoPush","command":"Icon","data":{"userId":"$userId","icon":$statusCode}}"""
+                Log.d("Presence", "[2] self→React Icon: userId=$userId icon=$statusCode")
+                ctx.evalJs("window.postMessage('${ctx.esc(iconMsg)}')")
                 val nick = ctx.appConfig.getMyNick()
-                val nickField = if (nick.isNotEmpty()) ""","nick":"${ctx.esc(nick)}"""" else ""
-                val presenceJson = """{"users":[{"userId":"$userId","icon":$statusCode$nickField}]}"""
-                Log.d("Presence", "[2] self→React: $presenceJson")
-                ctx.evalJs("window._onPresenceUpdate && window._onPresenceUpdate('${ctx.esc(presenceJson)}')")
+                if (nick.isNotEmpty()) {
+                    val nickMsg = """{"event":"neoPush","command":"Nick","data":{"userId":"$userId","nick":"${ctx.esc(nick)}"}}"""
+                    ctx.evalJs("window.postMessage('${ctx.esc(nickMsg)}')")
+                }
             }
         } else {
             ctx.rejectToJs("changeStatus", "both REST and socket failed")
@@ -395,20 +402,31 @@ class AppHandler(
     suspend fun handleSetNick(params: Map<String, Any?>) {
         val nick = ctx.paramStr(params, "nick")
         try {
-            val body = ctx.paramsToJson(params)
+            val userId = ctx.appConfig.getSavedUserId() ?: ""
+            // 서버가 브라우저와 동일하게 {userId, nick}만 받도록 명시적으로 구성
+            // (paramsToJson은 _callbackId 등 JS 내부 필드까지 포함해 서버가 업데이트를 조용히 무시함)
+            val body = JSONObject().apply {
+                put("userId", userId)
+                put("nick", nick)
+            }
             val token = ctx.appConfig.getSavedToken()
+            Log.d(TAG, "setNick request: $body")
             val result = withContext(Dispatchers.IO) {
                 ApiClient.postJson(ctx.appConfig.getEndpointByPath("/nick/setnick"), body, token)
             }
+            Log.d(TAG, "setNick response: $result")
+            val errorCode = result.optInt("errorCode", -1)
+            if (errorCode != 0) {
+                Log.w(TAG, "setNick REST rejected: errorCode=$errorCode")
+                ctx.rejectToJs("setNick", "errorCode=$errorCode")
+                return
+            }
             ctx.resolveToJs("setNick", result)
             if (nick.isNotEmpty()) ctx.appConfig.saveMyNick(nick)
-            val userId = ctx.appConfig.getSavedUserId() ?: ""
             if (nick.isNotEmpty() && userId.isNotEmpty()) {
-                val icon = ctx.appConfig.getMyStatusCode()
-                val iconField = if (icon > 0) ""","icon":$icon""" else ""
-                val nickJson = """{"users":[{"userId":"$userId","command":"Nick","nick":"${ctx.esc(nick)}"$iconField}]}"""
-                Log.d(TAG, "setNick self→React: $nickJson")
-                ctx.evalJs("window._onPresenceUpdate && window._onPresenceUpdate('${ctx.esc(nickJson)}')")
+                val nickMsg = """{"event":"neoPush","command":"Nick","data":{"userId":"$userId","nick":"${ctx.esc(nick)}"}}"""
+                Log.d(TAG, "setNick self→React: $nickMsg")
+                ctx.evalJs("window.postMessage('${ctx.esc(nickMsg)}')")
             }
         } catch (e: Exception) {
             ctx.rejectToJs("setNick", e.message)

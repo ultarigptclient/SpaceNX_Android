@@ -127,9 +127,9 @@ class LoginViewModel @Inject constructor(
 
     // ── 동기화 (SyncService 위임) ──
 
-    fun syncOrgAndBuddy(userId: String, useCache: Boolean = false) {
-        Log.d(TAG, "syncOrgAndBuddy() called: userId=$userId, useCache=$useCache")
-        syncService.syncOrgAndBuddy(userId, useCache)
+    fun syncOrgAndBuddy(userId: String) {
+        Log.d(TAG, "syncOrgAndBuddy() called: userId=$userId")
+        syncService.syncOrgAndBuddy(userId)
     }
 
     fun startBackgroundSync(
@@ -144,6 +144,11 @@ class LoginViewModel @Inject constructor(
     fun syncBuddy(userId: String) {
         Log.d(TAG, "syncBuddy() called: userId=$userId")
         syncService.syncBuddy(userId)
+    }
+
+    /** 포그라운드 복귀 시 소켓 alive 판정이어도 경량 delta 재동기화 (push 유실 보완) */
+    fun resyncDeltaOnly(userId: String, notifyCallback: (String) -> Unit, projectRepo: ProjectRepository? = null) {
+        syncService.resyncDeltaOnly(userId, notifyCallback, projectRepo)
     }
 
     /** onDestroy 시 백그라운드 sync 취소 */

@@ -29,6 +29,8 @@ class MainViewModel @Inject constructor(
     var isAutoLogin = false
     /** 선제적 autoLogin 결과 보관 (WebView 로드 전에 Authenticated 도달한 경우) */
     var pendingAuthJson: String? = null
+    /** hardReload 시 즉시 resolve용 — 마지막 Authenticated userJson 캐시 */
+    var lastAuthJson: String? = null
     var isForegroundResume = false
     var isLogoutRequested = false
     private var loginCompletedAt = 0L

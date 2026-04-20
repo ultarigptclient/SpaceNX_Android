@@ -31,6 +31,8 @@ class NotiRepository(
     companion object {
         private const val TAG = "NotiRepository"
         private const val SYNC_META_KEY = "notiEventOffset"
+        private const val MAX_SYNC_PAGES = 200
+        private const val NOTI_PAGE_SIZE = 300
     }
 
     private val syncMutex = Mutex()
@@ -44,86 +46,116 @@ class NotiRepository(
             try {
                 val token = awaitToken()
                 val notiDb = dbProvider.getNotiDatabase()
-                val lastOffset = notiDb.syncMetaDao().getValue(SYNC_META_KEY) ?: 0L
                 val userId = appConfig.getSavedUserId() ?: ""
-
-                Log.d(TAG, "syncNoti: userId=$userId, lastOffset=$lastOffset")
-                FileLogger.log(TAG, "syncNoti REQ userId=$userId offset=$lastOffset")
-
                 val commApi = ApiClient.createCommApiFromBaseUrl(appConfig.getRestBaseUrl(), token)
                 val endpoint = appConfig.getEndpoint(EP_COMM_SYNC_NOTI, "api/noti/syncnoti")
 
-                val requestJson = JSONObject().apply {
-                    put("userId", userId)
-                    put("notiEventOffset", lastOffset)
-                    put("reset", false)
-                }
-                val body = requestJson.toString()
-                    .toRequestBody("application/json".toMediaType())
+                var totalUpsert = 0
+                var totalRead = 0
+                var totalDelete = 0
+                var pageCount = 0
 
-                val response = commApi.post(endpoint, body)
+                do {
+                    val lastOffset = notiDb.syncMetaDao().getValue(SYNC_META_KEY) ?: 0L
 
-                if (!response.isSuccessful) {
-                    if (response.code() == 404) {
-                        Log.d(TAG, "syncNoti: endpoint not available (404), skipping")
-                        return@withContext mapOf<String, Any>("errorCode" to 0, "skipped" to true)
+                    Log.d(TAG, "syncNoti: userId=$userId, lastOffset=$lastOffset, page=$pageCount")
+                    FileLogger.log(TAG, "syncNoti REQ userId=$userId offset=$lastOffset page=$pageCount")
+
+                    val requestJson = JSONObject().apply {
+                        put("userId", userId)
+                        put("notiEventOffset", lastOffset)
+                        put("reset", false)
+                        put("limit", NOTI_PAGE_SIZE)
                     }
-                    Log.e(TAG, "syncNoti HTTP error: ${response.code()}")
-                    return@withContext mapOf<String, Any>("errorCode" to -1, "errorMessage" to "HTTP ${response.code()}")
-                }
+                    val body = requestJson.toString()
+                        .toRequestBody("application/json".toMediaType())
 
-                val rawJson = response.body()?.string() ?: "{}"
-                val json = JSONObject(rawJson)
-                val errorCode = json.optInt("errorCode", -1)
+                    val response = commApi.post(endpoint, body)
 
-                if (BuildConfig.DEBUG) Log.d(TAG, "syncNoti get json=$json")
+                    if (!response.isSuccessful) {
+                        if (response.code() == 404) {
+                            Log.d(TAG, "syncNoti: endpoint not available (404), skipping")
+                            return@withContext mapOf<String, Any>("errorCode" to 0, "skipped" to true)
+                        }
+                        Log.e(TAG, "syncNoti HTTP error: ${response.code()}")
+                        return@withContext mapOf<String, Any>("errorCode" to -1, "errorMessage" to "HTTP ${response.code()}")
+                    }
 
-                if (errorCode != 0) {
-                    return@withContext mapOf<String, Any>("errorCode" to errorCode)
-                }
+                    val rawJson = response.body()?.string() ?: "{}"
+                    val json = JSONObject(rawJson)
+                    val errorCode = json.optInt("errorCode", -1)
 
-                val lastEventId = json.optLong("lastEventId", 0L)
-                val dataArray = json.optJSONArray("data")
-                var upsertCount = 0
-                var readCount = 0
-                var deleteCount = 0
+                    if (BuildConfig.DEBUG) Log.d(TAG, "syncNoti page $pageCount json=$json")
 
-                if (dataArray != null) {
-                    for (i in 0 until dataArray.length()) {
-                        val event = dataArray.getJSONObject(i)
-                        val eventType = event.optString("eventType", "").uppercase()
-                        val notiCode = event.optString("notiCode", "")
+                    if (errorCode != 0) {
+                        return@withContext mapOf<String, Any>("errorCode" to errorCode)
+                    }
 
-                        when (eventType) {
-                            "ADD" -> {
-                                val entity = jsonToNotiEntity(event)
-                                notiDb.notiDao().insert(entity)
-                                upsertCount++
-                            }
-                            "READ" -> {
-                                notiDb.notiDao().markAsRead(notiCode)
-                                readCount++
-                            }
-                            "DEL" -> {
-                                notiDb.notiDao().deleteByNotiCode(notiCode)
-                                deleteCount++
+                    val lastEventId = json.optLong("lastEventId", 0L)
+                    val hasMore = json.optBoolean("hasMore", false)
+                    val dataArray = json.optJSONArray("data")
+                    var upsertCount = 0
+                    var readCount = 0
+                    var deleteCount = 0
+
+                    if (dataArray != null) {
+                        for (i in 0 until dataArray.length()) {
+                            val event = dataArray.getJSONObject(i)
+                            val eventType = event.optString("eventType", "").uppercase()
+                            val notiCode = event.optString("notiCode", "")
+
+                            when (eventType) {
+                                "ADD" -> {
+                                    val entity = jsonToNotiEntity(event)
+                                    notiDb.notiDao().insert(entity)
+                                    upsertCount++
+                                }
+                                "READ" -> {
+                                    notiDb.notiDao().markAsRead(notiCode)
+                                    readCount++
+                                }
+                                "DEL" -> {
+                                    notiDb.notiDao().deleteByNotiCode(notiCode)
+                                    deleteCount++
+                                }
                             }
                         }
                     }
-                }
 
-                // Update syncMeta offset
-                if (lastEventId > lastOffset) {
-                    notiDb.syncMetaDao().insert(SyncMetaEntity(SYNC_META_KEY, lastEventId))
-                }
+                    // Update syncMeta offset (다음 페이지 요청 시 반영)
+                    if (lastEventId > lastOffset) {
+                        notiDb.syncMetaDao().insert(SyncMetaEntity(SYNC_META_KEY, lastEventId))
+                    }
 
-                Log.d(TAG, "syncNoti complete: upsert=$upsertCount, read=$readCount, delete=$deleteCount, lastEventId=$lastEventId")
-                FileLogger.log(TAG, "syncNoti DONE upsert=$upsertCount read=$readCount delete=$deleteCount lastEventId=$lastEventId")
+                    totalUpsert += upsertCount
+                    totalRead += readCount
+                    totalDelete += deleteCount
+
+                    Log.d(TAG, "syncNoti page $pageCount: upsert=$upsertCount read=$readCount delete=$deleteCount lastEventId=$lastEventId hasMore=$hasMore")
+
+                    // ── 무한 루프 방지 가드 ──
+                    pageCount++
+                    val eventsSeen = dataArray?.length() ?: 0
+                    val emptyPage = eventsSeen == 0
+                    val offsetStalled = lastEventId <= lastOffset
+                    if (!hasMore || emptyPage || offsetStalled || pageCount >= MAX_SYNC_PAGES) {
+                        if (hasMore && pageCount >= MAX_SYNC_PAGES) {
+                            Log.w(TAG, "syncNoti: hit MAX_SYNC_PAGES=$MAX_SYNC_PAGES, stopping to avoid runaway")
+                        }
+                        if (hasMore && offsetStalled && !emptyPage) {
+                            Log.w(TAG, "syncNoti: offset stalled at $lastOffset, stopping (server inconsistency)")
+                        }
+                        break
+                    }
+                } while (true)
+
+                Log.d(TAG, "syncNoti complete: upsert=$totalUpsert, read=$totalRead, delete=$totalDelete, pages=$pageCount")
+                FileLogger.log(TAG, "syncNoti DONE upsert=$totalUpsert read=$totalRead delete=$totalDelete pages=$pageCount")
                 mapOf<String, Any>(
                     "errorCode" to 0,
-                    "upsertCount" to upsertCount,
-                    "readCount" to readCount,
-                    "deleteCount" to deleteCount
+                    "upsertCount" to totalUpsert,
+                    "readCount" to totalRead,
+                    "deleteCount" to totalDelete
                 )
             } catch (e: Exception) {
                 Log.e(TAG, "syncNoti error: ${e.message}", e)

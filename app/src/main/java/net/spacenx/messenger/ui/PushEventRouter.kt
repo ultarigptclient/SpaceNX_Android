@@ -85,18 +85,10 @@ class PushEventRouter(
                             }
                         }
 
-                        // ICON_EVENT는 presence 전용 경로로 전달 — forwardPushToReact 스킵
-                        if (cmd != ProtocolCommand.ICON_EVENT) {
-                            bridgeDispatcher.forwardPushToReact(cmd.protocol, data)
-                        } else {
-                            val escaped = bridgeDispatcher.esc(data.toString())
-                            Log.d("Presence", "[6] ICON_EVENT→React: $data")
-                            activity.runOnUiThread {
-                                webView.evaluateJavascript(
-                                    "window._onPresenceUpdate && window._onPresenceUpdate('$escaped')", null
-                                )
-                            }
-                        }
+                        // ICON_EVENT / NICK_EVENT 포함 모든 push는 neoPush 경로로 전달
+                        // React onPush('Icon'/'Nick') 핸들러가 _mergePresenceGlobal 처리
+                        Log.d("Presence", "[6] ${cmd.protocol}→React: $data")
+                        bridgeDispatcher.forwardPushToReact(cmd.protocol, data)
 
                         // Message 이벤트 → messageReady
                         if (cmd == ProtocolCommand.SEND_MESSAGE_EVENT ||
@@ -123,9 +115,11 @@ class PushEventRouter(
                             cmd == ProtocolCommand.ORG_DEPT_EVENT ||
                             cmd == ProtocolCommand.ORG_USER_REMOVED_EVENT ||
                             cmd == ProtocolCommand.ORG_DEPT_REMOVED_EVENT) {
+                            Log.d(TAG, "orgEvent: ${cmd.protocol} received, triggering syncOrg")
                             if (myUserId.isNotEmpty()) {
                                 try {
                                     loginViewModel.orgRepo.syncOrg(myUserId)
+                                    Log.d(TAG, "orgEvent: syncOrg complete → notifying orgReady+buddyReady")
                                 } catch (e: Exception) {
                                     Log.w(TAG, "orgRepo.syncOrg on ${cmd.protocol} failed: ${e.message}")
                                 }
@@ -289,6 +283,14 @@ class PushEventRouter(
                     val name = json.optString("name", "").takeIf { it != "null" } ?: ""
                     val comm = json.optString("comm", "")
                     Log.d(TAG, "Raw socket JSON: type=$messageType, key=$key, sender=$senderId")
+
+                    // Icon/Nick raw JSON → neoPush('Icon'/'Nick') 경로로 전달
+                    val command = json.optString("command", "")
+                    if (command == "Icon" || command == "Nick") {
+                        Log.d("Presence", "Raw JSON $command→React: $json")
+                        bridgeDispatcher.forwardPushToReact(command, json)
+                        return@launch
+                    }
 
                     when (messageType) {
                         "CHAT" -> {

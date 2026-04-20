@@ -152,10 +152,7 @@ class MessageHandler(
             ctx.notifyReactOnce("syncStart")
 
             ctx.loginViewModel.userNameCache.clear()
-            ctx.loginViewModel.syncOrgAndBuddy(
-                ctx.appConfig.getSavedUserId() ?: "",
-                useCache = false
-            )
+            ctx.loginViewModel.syncOrgAndBuddy(ctx.appConfig.getSavedUserId() ?: "")
             val projectRepo = (ctx as? net.spacenx.messenger.ui.bridge.BridgeDispatcher)?.projectRepo
             ctx.loginViewModel.startBackgroundSync(
                 notifyCallback = { event ->

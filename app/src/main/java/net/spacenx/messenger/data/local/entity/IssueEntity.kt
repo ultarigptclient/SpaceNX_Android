@@ -21,5 +21,7 @@ data class IssueEntity(
     val modDate: Long = 0L,
     val createdDate: Long = 0L,
     val threadCode: String = "",
-    val commentCount: Int = 0
+    val commentCount: Int = 0,
+    val parentIssueCode: String = "",
+    val milestoneCode: String = ""
 )

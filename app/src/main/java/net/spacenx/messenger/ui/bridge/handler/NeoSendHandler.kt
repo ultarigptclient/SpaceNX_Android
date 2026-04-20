@@ -76,6 +76,8 @@ class NeoSendHandler(
                             "issue" -> { projectRepo.syncIssue(); ctx.notifyReact("issueReady") }
                             "calendar" -> { projectRepo.syncCalendar(); ctx.notifyReactOnce("calReady") }
                             "todo" -> { projectRepo.syncTodo(); ctx.notifyReactOnce("todoReady") }
+                            "milestone" -> { ctx.notifyReactOnce("milestoneReady") }
+                            "shortcut" -> { ctx.notifyReactOnce("shortcutReady") }
                             "thread" -> {
                                 projectRepo.syncThread()
                                 // threadReady 이벤트에 chatCode/channelCode/commentCount 포함

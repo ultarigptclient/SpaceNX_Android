@@ -63,8 +63,8 @@ class SyncService @Inject constructor(
     @Volatile var lastBuddySyncMs: Long = 0L
         private set
 
-    fun syncOrgAndBuddy(userId: String, useCache: Boolean = false) {
-        Log.d(TAG, "syncOrgAndBuddy: userId=$userId, useCache=$useCache")
+    fun syncOrgAndBuddy(userId: String) {
+        Log.d(TAG, "syncOrgAndBuddy: userId=$userId")
         // 이전 sync Job 취소 (계정 전환 / 재연결 시 이전 사용자 작업 중단)
         orgBuddySyncJob?.cancel()
         // 이전 deferred 완료 → 재생성 (race condition 방지)
@@ -75,7 +75,6 @@ class SyncService @Inject constructor(
         syncChannelDeferred = CompletableDeferred()
         syncChatDeferred = CompletableDeferred()
 
-        val logPrefix = if (useCache) "reconnect " else ""
         orgBuddySyncJob = scope.launch {
             try {
                 coroutineScope {
@@ -83,23 +82,23 @@ class SyncService @Inject constructor(
                     // syncBuddy는 org DB 의존 → syncOrg 완료 후
                     val orgDeferred = async {
                         (withTimeoutOrNull(15_000L) { orgRepo.syncOrg(userId) } ?: false)
-                            .also { Log.d(TAG, "${logPrefix}syncOrg=$it") }
+                            .also { Log.d(TAG, "syncOrg=$it") }
                     }
                     val myPartDeferred = async {
                         if (appConfig.getMyDeptId() == null) {
                             (withTimeoutOrNull(15_000L) { buddyRepo.syncMyPart(userId) } ?: false)
-                                .also { Log.d(TAG, "${logPrefix}syncMyPart=$it") }
+                                .also { Log.d(TAG, "syncMyPart=$it") }
                         } else true
                     }
                     val channelDeferred = async {
                         (withTimeoutOrNull(15_000L) { channelRepo.syncChannel(userId) } ?: false)
-                            .also { Log.d(TAG, "${logPrefix}syncChannel=$it") }
+                            .also { Log.d(TAG, "syncChannel=$it") }
                     }
 
                     // syncOrg 완료 → syncBuddy
                     orgDeferred.await()
                     val buddySuccess = withTimeoutOrNull(15_000L) { buddyRepo.syncBuddy(userId) } ?: false
-                    Log.d(TAG, "${logPrefix}syncBuddy=$buddySuccess")
+                    Log.d(TAG, "syncBuddy=$buddySuccess")
 
                     // myPart 완료 대기 (buildBuddyListJson에서 myDeptId 사용)
                     myPartDeferred.await()
@@ -113,11 +112,11 @@ class SyncService @Inject constructor(
                     channelDeferred.await()
                     syncChannelDeferred.complete(Unit)
                     val chatSuccess = withTimeoutOrNull(15_000L) { channelRepo.syncChat(userId) } ?: false
-                    Log.d(TAG, "${logPrefix}syncChat=$chatSuccess")
+                    Log.d(TAG, "syncChat=$chatSuccess")
                     syncChatDeferred.complete(Unit)
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "${logPrefix}syncOrgAndBuddy failed: ${e.message}", e)
+                Log.e(TAG, "syncOrgAndBuddy failed: ${e.message}", e)
             } finally {
                 syncBuddyDeferred.complete(Unit)
                 syncChannelDeferred.complete(Unit)
@@ -135,7 +134,13 @@ class SyncService @Inject constructor(
         backgroundSyncJobs.forEach { it.cancel() }
         backgroundSyncJobs.clear()
 
-        // org → buddy
+        // ── 주의 ──
+        // 아래 org/buddy, channel/chat 블록은 실제 fetch 를 수행하지 않는 "이벤트 브로커" 다.
+        // 실제 sync 는 syncOrgAndBuddy() Wave 1 에서 실행되고, 여기서는 syncBuddyDeferred/syncChannelDeferred/syncChatDeferred
+        // 완료를 await 후 React 에 *Ready 이벤트만 발행한다.
+        // message/noti/project/issue/thread/calendar/todo 만 이 함수에서 실제 fetch 를 수행한다.
+
+        // org → buddy (Wave 1 완료 통지)
         backgroundSyncJobs += scope.launch {
             try {
                 syncStatusCallback?.invoke("org", "syncing", null, null)
@@ -156,7 +161,7 @@ class SyncService @Inject constructor(
                 notifyCallback("buddyReady")
             }
         }
-        // channel → chat
+        // channel → chat (Wave 1 완료 통지)
         backgroundSyncJobs += scope.launch {
             try {
                 syncStatusCallback?.invoke("channel", "syncing", null, null)
@@ -223,6 +228,9 @@ class SyncService @Inject constructor(
         // project / issue / thread
         if (projectRepo != null) {
             backgroundSyncJobs += scope.launch {
+                // ProjectChannelEntity 매핑이 chat DB의 채널 레코드에 의존하므로
+                // syncChannel 완료 후에 syncProject 시작 (race 방지)
+                try { syncChannelDeferred.await() } catch (_: Exception) {}
                 try {
                     syncStatusCallback?.invoke("project", "syncing", null, null)
                     projectRepo.syncProject()
@@ -281,6 +289,32 @@ class SyncService @Inject constructor(
         scope.launch {
             val success = buddyRepo.syncBuddy(userId)
             Log.d(TAG, "syncBuddy result: $success")
+        }
+    }
+
+    /**
+     * 포그라운드 복귀 시 소켓은 살아있지만 백그라운드 동안 일부 push 프레임을 놓쳤을 가능성에 대비한
+     * 경량 delta 재동기화. offset 기반 API 만 호출하여 누락된 이벤트를 따라잡고 React에 Ready 이벤트 전달.
+     * Wave 1 (syncOrg/syncBuddy)은 스킵 — 조직도/버디는 delta 이벤트 주기가 길어 Wave 2 주기로 충분.
+     */
+    fun resyncDeltaOnly(userId: String, notifyCallback: (String) -> Unit, projectRepo: ProjectRepository? = null) {
+        scope.launch {
+            try { channelRepo.syncChannel(userId); notifyCallback("channelReady") }
+            catch (e: Exception) { Log.w(TAG, "resyncDelta syncChannel: ${e.message}") }
+            try { channelRepo.syncChat(userId); notifyCallback("chatReady") }
+            catch (e: Exception) { Log.w(TAG, "resyncDelta syncChat: ${e.message}") }
+            try { messageRepo.syncMessage(); notifyCallback("messageReady") }
+            catch (e: Exception) { Log.w(TAG, "resyncDelta syncMessage: ${e.message}") }
+            try { notiRepo.syncNoti(); notifyCallback("notiReady") }
+            catch (e: Exception) { Log.w(TAG, "resyncDelta syncNoti: ${e.message}") }
+            if (projectRepo != null) {
+                try { projectRepo.syncProject(); notifyCallback("projectReady") }
+                catch (e: Exception) { Log.w(TAG, "resyncDelta syncProject: ${e.message}") }
+                try { projectRepo.syncIssue(); notifyCallback("issueReady") }
+                catch (e: Exception) { Log.w(TAG, "resyncDelta syncIssue: ${e.message}") }
+                try { projectRepo.syncThread(); notifyCallback("threadReady") }
+                catch (e: Exception) { Log.w(TAG, "resyncDelta syncThread: ${e.message}") }
+            }
         }
     }
 

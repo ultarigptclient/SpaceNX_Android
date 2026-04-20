@@ -35,4 +35,10 @@ interface IssueDao {
 
     @Query("SELECT * FROM issues WHERE projectCode = '' OR projectCode IS NULL")
     suspend fun getAllTodos(): List<IssueEntity>
+
+    @Query("SELECT * FROM issues WHERE parentIssueCode = :parentIssueCode")
+    suspend fun getByParent(parentIssueCode: String): List<IssueEntity>
+
+    @Query("SELECT * FROM issues WHERE milestoneCode = :milestoneCode")
+    suspend fun getByMilestone(milestoneCode: String): List<IssueEntity>
 }

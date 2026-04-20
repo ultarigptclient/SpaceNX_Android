@@ -68,7 +68,7 @@ class LoginStateCoordinator(
 
         val userId = Constants.myId.ifEmpty { appConfig.getSavedUserId() ?: "" }
         databaseProvider.initForUser(userId)
-        loginViewModel.syncOrgAndBuddy(userId, useCache = mainViewModel.isForegroundResume)
+        loginViewModel.syncOrgAndBuddy(userId)
 
         // FRONTEND_SKIN/VERSION 변경 감지 (sync 완료 후 URL 전환)
         val pendingSpaUrl = appConfig.getSpaUrl()
@@ -99,6 +99,7 @@ class LoginStateCoordinator(
             mainViewModel.isAutoLogin -> {
                 val authJson = JsEscapeUtil.escapeForJs(state.userJson)
                 mainViewModel.pendingAuthJson = authJson
+                mainViewModel.lastAuthJson = authJson
                 Log.d(TAG, "Authenticated: pendingAuthJson saved, will resolve on waitAutoLogin")
                 webView.evaluateJavascript(
                     "(function(){var fn=window._waitAutoLoginResolve||window._autoLoginResolve;" +

@@ -133,6 +133,7 @@ class ProjectRepository(
                         db.projectDao().deleteAllMembers(projectCode)
                         db.projectDao().deleteAllChannels(projectCode)
                         db.issueDao().deleteByProject(projectCode)
+                        db.milestoneDao().deleteByProject(projectCode)
                     }
                 }
                 "ADD_MEMBER" -> {
@@ -229,7 +230,9 @@ class ProjectRepository(
                             modDate = issue.optLong("modDate", 0L),
                             createdDate = issue.optLong("createdDate", 0L),
                             threadCode = issue.optString("threadCode", ""),
-                            commentCount = issue.optInt("commentCount", 0)
+                            commentCount = issue.optInt("commentCount", 0),
+                            parentIssueCode = issue.optString("parentIssueCode", ""),
+                            milestoneCode = issue.optString("milestoneCode", "")
                         )))
                     }
                 }
@@ -572,8 +575,13 @@ class ProjectRepository(
                     JSONObject().put("errorCode", 0).put("project", projectToJson(p, members, channels, issueCount))
                 }
                 "/comm/getissues" -> {
-                    val projectCode = body.optString("projectCode", "")
-                    val issues = db.issueDao().getByProject(projectCode)
+                    val parentIssueCode = body.optString("parentIssueCode", "")
+                    val issues = if (parentIssueCode.isNotEmpty()) {
+                        db.issueDao().getByParent(parentIssueCode)
+                    } else {
+                        val projectCode = body.optString("projectCode", "")
+                        db.issueDao().getByProject(projectCode)
+                    }
                     if (issues.isEmpty()) return@withContext null
                     JSONObject().put("errorCode", 0).put("issues", issuesToJsonArray(issues))
                 }
@@ -767,7 +775,9 @@ class ProjectRepository(
                             modDate = src.optLong("modDate", System.currentTimeMillis()),
                             createdDate = src.optLong("createdDate", System.currentTimeMillis()),
                             threadCode = src.optString("threadCode", ""),
-                            commentCount = src.optInt("commentCount", 0)
+                            commentCount = src.optInt("commentCount", 0),
+                            parentIssueCode = src.optString("parentIssueCode", body.optString("parentIssueCode", "")),
+                            milestoneCode = src.optString("milestoneCode", body.optString("milestoneCode", ""))
                         )))
                     } else {
                         Log.w(TAG, "cacheAfterCud: no issueCode found in result or body")
@@ -821,13 +831,81 @@ class ProjectRepository(
                             modDate = src.optLong("modDate", System.currentTimeMillis()),
                             createdDate = src.optLong("createdDate", System.currentTimeMillis()),
                             threadCode = src.optString("threadCode", ""),
-                            commentCount = src.optInt("commentCount", 0)
+                            commentCount = src.optInt("commentCount", 0),
+                            parentIssueCode = src.optString("parentIssueCode", body.optString("parentIssueCode", "")),
+                            milestoneCode = src.optString("milestoneCode", body.optString("milestoneCode", ""))
                         )))
                     }
                 }
                 "/comm/deletetodo" -> {
                     val issueCode = body.optString("issueCode", result.optString("issueCode", ""))
                     if (issueCode.isNotEmpty()) db.issueDao().delete(issueCode)
+                }
+
+                // ── Milestones (CRUD) ── 읽기는 항상 서버 히트, 쓰기만 로컬 반영
+                "/comm/createmilestone", "/comm/updatemilestone" -> {
+                    val src = result.optJSONObject("milestone") ?: result
+                    val milestoneCode = src.optString("milestoneCode", body.optString("milestoneCode", ""))
+                    if (milestoneCode.isNotEmpty()) {
+                        val merged = JSONObject().apply {
+                            body.keys().forEach { k -> put(k, body.get(k)) }
+                            src.keys().forEach { k -> put(k, src.get(k)) }
+                        }
+                        val projectCode = merged.optString("projectCode", body.optString("projectCode", ""))
+                        db.milestoneDao().insertAll(listOf(milestoneObjToEntity(merged, milestoneCode, projectCode)))
+                    }
+                }
+                "/comm/deletemilestone" -> {
+                    val milestoneCode = body.optString("milestoneCode", result.optString("milestoneCode", ""))
+                    if (milestoneCode.isNotEmpty()) db.milestoneDao().delete(milestoneCode)
+                }
+
+                // ── Shortcuts (바로가기 CRUD) ── 읽기는 항상 서버 히트, 쓰기만 로컬 반영
+                "/comm/addshortcut" -> {
+                    val src = result.optJSONObject("shortcut") ?: result
+                    val shortcutId = src.optLong("shortcutId", 0L)
+                    val savedUserId = body.optString("userId", appConfig.getSavedUserId() ?: "")
+                    if (shortcutId > 0L) {
+                        val merged = JSONObject().apply {
+                            body.keys().forEach { k -> put(k, body.get(k)) }
+                            src.keys().forEach { k -> put(k, src.get(k)) }
+                        }
+                        // 기본 orderIndex: 기존 최대값 + 1
+                        val existing = db.shortcutDao().getByUser(savedUserId)
+                        val nextOrder = (existing.maxOfOrNull { it.orderIndex } ?: -1) + 1
+                        db.shortcutDao().insertAll(listOf(shortcutObjToEntity(merged, shortcutId, savedUserId, nextOrder)))
+                    }
+                }
+                "/comm/deleteshortcut" -> {
+                    val shortcutId = body.optLong("shortcutId", result.optLong("shortcutId", 0L))
+                    if (shortcutId > 0L) db.shortcutDao().delete(shortcutId)
+                }
+                "/comm/renameshortcut" -> {
+                    val shortcutId = body.optLong("shortcutId", 0L)
+                    val displayName = body.optString("displayName", "")
+                    if (shortcutId > 0L && displayName.isNotEmpty()) {
+                        db.shortcutDao().rename(shortcutId, displayName)
+                    }
+                }
+                "/comm/touchshortcut" -> {
+                    // 서버 사용 최근 기록. 로컬 정렬에 반영할 값이 없으므로 no-op (recency DESC 쿼리 필요 시 컬럼 추가 고려)
+                }
+                "/comm/reordershortcuts" -> {
+                    val orderedIds = body.optJSONArray("orderedIds") ?: return@withContext
+                    for (i in 0 until orderedIds.length()) {
+                        val sid = orderedIds.optLong(i, 0L)
+                        if (sid > 0L) db.shortcutDao().updateOrder(sid, i)
+                    }
+                }
+
+                // ── 채널 mute 서버 동기화 → AppConfig 반영 (FCM 알림 필터용) ──
+                "/comm/mutechannel" -> {
+                    val channelCode = body.optString("channelCode", "")
+                    if (channelCode.isNotEmpty()) {
+                        val mute = body.optBoolean("mute", false)
+                        if (mute) appConfig.muteChannel(channelCode) else appConfig.unmuteChannel(channelCode)
+                        Log.d(TAG, "cacheAfterCud mutechannel: $channelCode mute=$mute")
+                    }
                 }
             }
         } catch (e: Exception) {
@@ -844,7 +922,7 @@ class ProjectRepository(
         }
     }
 
-    /** CUD 후 관련 sync 트리거 필요 여부 반환: "project", "issue", "thread", 또는 null */
+    /** CUD 후 관련 sync 트리거 필요 여부 반환: "project", "issue", "thread", "calendar", "todo", "milestone", "shortcut", 또는 null */
     fun getSyncTypeForPath(path: String): String? {
         return when {
             path in listOf("/comm/createproject", "/comm/updateproject", "/comm/deleteproject",
@@ -855,6 +933,9 @@ class ProjectRepository(
                 "/comm/addthreadcomment", "/comm/deletethreadcomment") -> "thread"
             path in listOf("/comm/createcalevent", "/comm/updatecalevent", "/comm/deletecalevent") -> "calendar"
             path in listOf("/comm/createtodo", "/comm/updatetodo", "/comm/deletetodo") -> "todo"
+            path in listOf("/comm/createmilestone", "/comm/updatemilestone", "/comm/deletemilestone") -> "milestone"
+            path in listOf("/comm/addshortcut", "/comm/deleteshortcut", "/comm/renameshortcut",
+                "/comm/reordershortcuts") -> "shortcut"
             else -> null
         }
     }
@@ -992,11 +1073,79 @@ class ProjectRepository(
             if (i.modDate > 0) put("modDate", i.modDate)
             put("threadCode", i.threadCode)
             put("commentCount", i.commentCount)
+            if (i.parentIssueCode.isNotEmpty()) put("parentIssueCode", i.parentIssueCode)
+            if (i.milestoneCode.isNotEmpty()) put("milestoneCode", i.milestoneCode)
         }
     }
 
     private fun issuesToJsonArray(issues: List<IssueEntity>): JSONArray {
         return JSONArray().apply { issues.forEach { put(issueToJson(it)) } }
+    }
+
+    private fun milestoneToJson(m: MilestoneEntity): JSONObject {
+        return JSONObject().apply {
+            put("milestoneCode", m.milestoneCode)
+            put("projectCode", m.projectCode)
+            put("milestoneName", m.milestoneName)
+            put("description", m.description)
+            put("milestoneStatus", m.milestoneStatus)
+            put("ownerUserId", m.ownerUserId)
+            if (m.startDate > 0) put("startDate", m.startDate)
+            if (m.targetDate > 0) put("targetDate", m.targetDate)
+            if (m.createdDate > 0) put("createdDate", m.createdDate)
+            if (m.modDate > 0) put("modDate", m.modDate)
+        }
+    }
+
+    private fun milestonesToJsonArray(list: List<MilestoneEntity>): JSONArray {
+        return JSONArray().apply { list.forEach { put(milestoneToJson(it)) } }
+    }
+
+    private fun milestoneObjToEntity(obj: JSONObject, milestoneCode: String, fallbackProjectCode: String): MilestoneEntity {
+        return MilestoneEntity(
+            milestoneCode = milestoneCode,
+            projectCode = obj.optString("projectCode", fallbackProjectCode),
+            milestoneName = obj.optString("milestoneName", ""),
+            description = obj.optString("description", ""),
+            milestoneStatus = obj.optString("milestoneStatus", "TODO"),
+            ownerUserId = obj.optString("ownerUserId", ""),
+            startDate = obj.optLong("startDate", 0L),
+            targetDate = obj.optLong("targetDate", 0L),
+            modDate = obj.optLong("modDate", System.currentTimeMillis()),
+            createdDate = obj.optLong("createdDate", System.currentTimeMillis())
+        )
+    }
+
+    private fun shortcutToJson(s: ShortcutEntity): JSONObject {
+        return JSONObject().apply {
+            put("shortcutId", s.shortcutId)
+            put("userId", s.userId)
+            put("shortcutType", s.shortcutType)
+            put("targetId", s.targetId)
+            put("displayName", s.displayName)
+            if (s.icon.isNotEmpty()) put("icon", s.icon)
+            put("orderIndex", s.orderIndex)
+            if (s.createdDate > 0) put("createdDate", s.createdDate)
+            if (s.modDate > 0) put("modDate", s.modDate)
+        }
+    }
+
+    private fun shortcutsToJsonArray(list: List<ShortcutEntity>): JSONArray {
+        return JSONArray().apply { list.forEach { put(shortcutToJson(it)) } }
+    }
+
+    private fun shortcutObjToEntity(obj: JSONObject, shortcutId: Long, fallbackUserId: String, orderIndex: Int): ShortcutEntity {
+        return ShortcutEntity(
+            shortcutId = shortcutId,
+            userId = obj.optString("userId", fallbackUserId),
+            shortcutType = obj.optString("shortcutType", ""),
+            targetId = obj.optString("targetId", ""),
+            displayName = obj.optString("displayName", ""),
+            icon = obj.optString("icon", ""),
+            orderIndex = obj.optInt("orderIndex", orderIndex),
+            modDate = obj.optLong("modDate", System.currentTimeMillis()),
+            createdDate = obj.optLong("createdDate", System.currentTimeMillis())
+        )
     }
 
     private suspend fun threadsToJsonArray(threads: List<ChatThreadEntity>, chatDb: ChatDatabase): JSONArray {

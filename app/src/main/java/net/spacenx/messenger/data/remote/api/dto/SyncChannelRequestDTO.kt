@@ -6,5 +6,6 @@ import kotlinx.serialization.Serializable
 data class SyncChannelRequestDTO(
     val userId: String,
     val channelEventOffset: Long = 0L,
-    val reset: Boolean = false
+    val reset: Boolean = false,
+    val limit: Int = 0
 )

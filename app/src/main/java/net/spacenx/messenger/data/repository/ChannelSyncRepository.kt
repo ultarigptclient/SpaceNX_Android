@@ -39,6 +39,10 @@ class ChannelSyncRepository(
         private const val TAG = "ChannelSyncRepository"
         internal const val SYNC_META_KEY = "channel_last_sync_time"
         internal const val CHAT_SYNC_META_KEY = "chat_last_sync_time"
+        // 무한 루프 방지: 한 번의 syncChannel/syncChat 호출에서 최대 페이지 수
+        private const val MAX_SYNC_PAGES = 200
+        private const val CHANNEL_PAGE_SIZE = 200
+        private const val CHAT_PAGE_SIZE = 500
     }
 
     private val channelSyncMutex = Mutex()
@@ -58,14 +62,17 @@ class ChannelSyncRepository(
             try {
                 val token = ChannelUtils.awaitToken(sessionManager)
                 val chatDb = databaseProvider.getChatDatabase()
-                val lastOffset = chatDb.syncMetaDao().getValueSync(SYNC_META_KEY) ?: 0L
-
-                Log.d(TAG, "syncChannel: userId=$userId, lastOffset=$lastOffset")
-                FileLogger.log(TAG, "syncChannel REQ userId=$userId offset=$lastOffset")
-
                 val channelApi = ApiClient.createChannelApiFromBaseUrl(appConfig.getRestBaseUrl(), token)
                 val endpoint = appConfig.getEndpoint(EP_COMM_SYNC_CHANNEL, "api/comm/syncchannel")
-                val request = SyncChannelRequestDTO(userId = userId, channelEventOffset = lastOffset, reset = false)
+
+                var pageCount = 0
+                do {
+                val lastOffset = chatDb.syncMetaDao().getValueSync(SYNC_META_KEY) ?: 0L
+
+                Log.d(TAG, "syncChannel: userId=$userId, lastOffset=$lastOffset, page=$pageCount")
+                FileLogger.log(TAG, "syncChannel REQ userId=$userId offset=$lastOffset page=$pageCount")
+
+                val request = SyncChannelRequestDTO(userId = userId, channelEventOffset = lastOffset, reset = false, limit = CHANNEL_PAGE_SIZE)
                 val response = channelApi.syncChannel(endpoint, request)
 
                 if (!response.isSuccessful) {
@@ -75,6 +82,7 @@ class ChannelSyncRepository(
 
                 var errorCode = -1
                 var lastEventId = 0L
+                var hasMore = false
                 val eventsArray = mutableListOf<JSONObject>()
                 val respBody = response.body() ?: return@withContext false
                 respBody.parseStream { reader ->
@@ -83,6 +91,7 @@ class ChannelSyncRepository(
                         when (reader.nextName()) {
                             "errorCode" -> errorCode = JsonStreamUtil.nextIntOrZero(reader)
                             "lastEventId" -> lastEventId = JsonStreamUtil.nextLongOrZero(reader)
+                            "hasMore" -> hasMore = JsonStreamUtil.nextBooleanOrFalse(reader)
                             "events" -> {
                                 reader.beginArray()
                                 while (reader.hasNext()) eventsArray.add(JsonStreamUtil.readObject(reader))
@@ -93,8 +102,8 @@ class ChannelSyncRepository(
                     }
                     reader.endObject()
                 }
-                Log.d(TAG, "syncChannel page: events=${eventsArray.size}, lastEventId=$lastEventId, errorCode=$errorCode")
-                FileLogger.log(TAG, "syncChannel RES events=${eventsArray.size} lastEventId=$lastEventId errorCode=$errorCode")
+                Log.d(TAG, "syncChannel page: events=${eventsArray.size}, lastEventId=$lastEventId, hasMore=$hasMore, errorCode=$errorCode")
+                FileLogger.log(TAG, "syncChannel RES events=${eventsArray.size} lastEventId=$lastEventId hasMore=$hasMore errorCode=$errorCode")
 
                 if (errorCode != 0) return@withContext false
 
@@ -279,8 +288,24 @@ class ChannelSyncRepository(
                     if (lastEventId > 0) { chatDb.syncMetaDao().insertSync(SyncMetaEntity(SYNC_META_KEY, lastEventId)) }
                 } }
 
-                Log.d(TAG, "syncChannel complete: lastEventId=$lastEventId")
-                FileLogger.log(TAG, "syncChannel DONE lastEventId=$lastEventId channels=${channels.size} members=${members.size}")
+                Log.d(TAG, "syncChannel page done: lastEventId=$lastEventId, channels=${channels.size}, members=${members.size}")
+
+                // ── 무한 루프 방지 가드 (MessageRepository.syncMessage 패턴과 동일) ──
+                pageCount++
+                val emptyPage = eventsArray.isEmpty()
+                val offsetStalled = lastEventId <= lastOffset
+                if (!hasMore || emptyPage || offsetStalled || pageCount >= MAX_SYNC_PAGES) {
+                    if (hasMore && pageCount >= MAX_SYNC_PAGES) {
+                        Log.w(TAG, "syncChannel: hit MAX_SYNC_PAGES=$MAX_SYNC_PAGES, stopping to avoid runaway")
+                    }
+                    if (hasMore && offsetStalled && !emptyPage) {
+                        Log.w(TAG, "syncChannel: offset stalled at $lastOffset, stopping (server inconsistency)")
+                    }
+                    break
+                }
+                } while (true)
+
+                FileLogger.log(TAG, "syncChannel DONE pages=$pageCount")
                 true
             } catch (e: Exception) {
                 Log.e(TAG, "syncChannel error: ${e.message}", e)
@@ -298,14 +323,17 @@ class ChannelSyncRepository(
             try {
                 val token = ChannelUtils.awaitToken(sessionManager)
                 val chatDb = databaseProvider.getChatDatabase()
-                val lastOffset = chatDb.syncMetaDao().getValueSync(CHAT_SYNC_META_KEY) ?: 0L
-
-                Log.d(TAG, "syncChat: userId=$userId, lastOffset=$lastOffset")
-                FileLogger.log(TAG, "syncChat REQ userId=$userId offset=$lastOffset")
-
                 val channelApi = ApiClient.createChannelApiFromBaseUrl(appConfig.getRestBaseUrl(), token)
                 val endpoint = appConfig.getEndpoint(EP_COMM_SYNC_CHAT, "api/comm/syncchat")
-                val request = SyncChatRequestDTO(userId = userId, chatEventOffset = lastOffset)
+
+                var pageCount = 0
+                do {
+                val lastOffset = chatDb.syncMetaDao().getValueSync(CHAT_SYNC_META_KEY) ?: 0L
+
+                Log.d(TAG, "syncChat: userId=$userId, lastOffset=$lastOffset, page=$pageCount")
+                FileLogger.log(TAG, "syncChat REQ userId=$userId offset=$lastOffset page=$pageCount")
+
+                val request = SyncChatRequestDTO(userId = userId, chatEventOffset = lastOffset, limit = CHAT_PAGE_SIZE)
                 val response = channelApi.syncChat(endpoint, request)
 
                 if (!response.isSuccessful) {
@@ -315,6 +343,7 @@ class ChannelSyncRepository(
 
                 var errorCode = -1
                 var lastEventId = lastOffset
+                var hasMore = false
                 val eventsArray = mutableListOf<JSONObject>()
                 val respBody = response.body() ?: return@withContext false
                 respBody.parseStream { reader ->
@@ -323,6 +352,7 @@ class ChannelSyncRepository(
                         when (reader.nextName()) {
                             "errorCode" -> errorCode = JsonStreamUtil.nextIntOrZero(reader)
                             "lastEventId" -> lastEventId = JsonStreamUtil.nextLongOrZero(reader)
+                            "hasMore" -> hasMore = JsonStreamUtil.nextBooleanOrFalse(reader)
                             "events" -> {
                                 reader.beginArray()
                                 while (reader.hasNext()) eventsArray.add(JsonStreamUtil.readObject(reader))
@@ -333,8 +363,8 @@ class ChannelSyncRepository(
                     }
                     reader.endObject()
                 }
-                Log.d(TAG, "syncChat page: events=${eventsArray.size}, lastEventId=$lastEventId, errorCode=$errorCode")
-                FileLogger.log(TAG, "syncChat RES events=${eventsArray.size} lastEventId=$lastEventId errorCode=$errorCode")
+                Log.d(TAG, "syncChat page: events=${eventsArray.size}, lastEventId=$lastEventId, hasMore=$hasMore, errorCode=$errorCode")
+                FileLogger.log(TAG, "syncChat RES events=${eventsArray.size} lastEventId=$lastEventId hasMore=$hasMore errorCode=$errorCode")
 
                 if (errorCode != 0) return@withContext false
 
@@ -480,8 +510,24 @@ class ChannelSyncRepository(
                     }
                 } }
 
-                Log.d(TAG, "syncChat complete: ${chats.size} chats, lastEventId=$lastEventId")
-                FileLogger.log(TAG, "syncChat DONE chats=${chats.size} lastEventId=$lastEventId")
+                Log.d(TAG, "syncChat page done: chats=${chats.size}, lastEventId=$lastEventId")
+
+                // ── 무한 루프 방지 가드 ──
+                pageCount++
+                val emptyPage = eventsArray.isEmpty()
+                val offsetStalled = lastEventId <= lastOffset
+                if (!hasMore || emptyPage || offsetStalled || pageCount >= MAX_SYNC_PAGES) {
+                    if (hasMore && pageCount >= MAX_SYNC_PAGES) {
+                        Log.w(TAG, "syncChat: hit MAX_SYNC_PAGES=$MAX_SYNC_PAGES, stopping to avoid runaway")
+                    }
+                    if (hasMore && offsetStalled && !emptyPage) {
+                        Log.w(TAG, "syncChat: offset stalled at $lastOffset, stopping (server inconsistency)")
+                    }
+                    break
+                }
+                } while (true)
+
+                FileLogger.log(TAG, "syncChat DONE pages=$pageCount")
                 true
             } catch (e: Exception) {
                 Log.e(TAG, "syncChat error: ${e.message}", e)
