@@ -2,6 +2,7 @@ package net.spacenx.messenger.data.repository
 
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.withContext
 import net.spacenx.messenger.util.FileLogger
 import net.spacenx.messenger.common.AppConfig
@@ -32,11 +33,18 @@ class ProjectRepository(
         private const val SYNC_PAGE_SIZE = 200
     }
 
+    private val projectSyncMutex = Mutex()
+    private val issueSyncMutex = Mutex()
+    private val threadSyncMutex = Mutex()
+    private val calendarSyncMutex = Mutex()
+    private val todoSyncMutex = Mutex()
+
     // ══════════════════════════════════════
     // syncProject — 프로젝트 delta sync
     // ══════════════════════════════════════
 
     suspend fun syncProject(): Boolean = withContext(Dispatchers.IO) {
+        if (!projectSyncMutex.tryLock()) { Log.d(TAG, "syncProject already in progress, skipping"); return@withContext true }
         try {
             val db = dbProvider.getProjectDatabase()
             val userId = appConfig.getSavedUserId() ?: return@withContext false
@@ -76,7 +84,7 @@ class ProjectRepository(
             Log.e(TAG, "syncProject error: ${e.message}", e)
             FileLogger.log(TAG, "syncProject ERROR ${e.message}")
             false
-        }
+        } finally { projectSyncMutex.unlock() }
     }
 
     private suspend fun processProjectEvents(db: net.spacenx.messenger.data.local.ProjectDatabase, events: JSONArray) {
@@ -164,6 +172,7 @@ class ProjectRepository(
     // ══════════════════════════════════════
 
     suspend fun syncIssue(): Boolean = withContext(Dispatchers.IO) {
+        if (!issueSyncMutex.tryLock()) { Log.d(TAG, "syncIssue already in progress, skipping"); return@withContext true }
         try {
             val db = dbProvider.getProjectDatabase()
             val userId = appConfig.getSavedUserId() ?: return@withContext false
@@ -200,7 +209,7 @@ class ProjectRepository(
             Log.e(TAG, "syncIssue error: ${e.message}", e)
             FileLogger.log(TAG, "syncIssue ERROR ${e.message}")
             false
-        }
+        } finally { issueSyncMutex.unlock() }
     }
 
     private suspend fun processIssueEvents(db: net.spacenx.messenger.data.local.ProjectDatabase, events: JSONArray) {
@@ -248,6 +257,7 @@ class ProjectRepository(
     // ══════════════════════════════════════
 
     suspend fun syncCalendar(): Boolean = withContext(Dispatchers.IO) {
+        if (!calendarSyncMutex.tryLock()) { Log.d(TAG, "syncCalendar already in progress, skipping"); return@withContext true }
         try {
             val db = dbProvider.getProjectDatabase()
             val userId = appConfig.getSavedUserId() ?: return@withContext false
@@ -292,7 +302,7 @@ class ProjectRepository(
             Log.e(TAG, "syncCalendar error: ${e.message}", e)
             FileLogger.log(TAG, "syncCalendar ERROR ${e.message}")
             false
-        }
+        } finally { calendarSyncMutex.unlock() }
     }
 
     private suspend fun processCalEvents(db: net.spacenx.messenger.data.local.ProjectDatabase, userId: String, events: JSONArray) {
@@ -321,6 +331,7 @@ class ProjectRepository(
     // ══════════════════════════════════════
 
     suspend fun syncTodo(): Boolean = withContext(Dispatchers.IO) {
+        if (!todoSyncMutex.tryLock()) { Log.d(TAG, "syncTodo already in progress, skipping"); return@withContext true }
         try {
             val db = dbProvider.getProjectDatabase()
             val userId = appConfig.getSavedUserId() ?: return@withContext false
@@ -358,7 +369,7 @@ class ProjectRepository(
             Log.e(TAG, "syncTodo error: ${e.message}", e)
             FileLogger.log(TAG, "syncTodo ERROR ${e.message}")
             false
-        }
+        } finally { todoSyncMutex.unlock() }
     }
 
     private suspend fun processTodoEvents(db: net.spacenx.messenger.data.local.ProjectDatabase, events: JSONArray) {
@@ -405,6 +416,7 @@ class ProjectRepository(
     // ══════════════════════════════════════
 
     suspend fun syncThread(): Boolean = withContext(Dispatchers.IO) {
+        if (!threadSyncMutex.tryLock()) { Log.d(TAG, "syncThread already in progress, skipping"); return@withContext true }
         try {
             val db = dbProvider.getProjectDatabase()
             val userId = appConfig.getSavedUserId() ?: return@withContext false
@@ -483,7 +495,7 @@ class ProjectRepository(
             Log.e(TAG, "syncThread error: ${e.message}", e)
             FileLogger.log(TAG, "syncThread ERROR ${e.message}")
             false
-        }
+        } finally { threadSyncMutex.unlock() }
     }
 
     private suspend fun processThreadEvents(db: net.spacenx.messenger.data.local.ProjectDatabase, events: JSONArray) {
