@@ -38,6 +38,7 @@ class AppUpdateChecker(
          * 업데이트 APK 다운로드를 허용할 호스트 목록.
          * 정확 매칭만 허용. 새 호스트 추가 시 코드 변경 + 앱 업데이트 필요.
          */
+        //최종 apk 릴리즈시 확인 필수!
         private val ALLOWED_UPDATE_HOSTS = setOf(
             "www.ultari.co.kr",
             "neo.ultari.co.kr"

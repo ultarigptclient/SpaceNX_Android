@@ -3,6 +3,7 @@ package net.spacenx.messenger.data.remote.api
 import android.util.Base64
 import kotlinx.serialization.json.Json
 import net.spacenx.messenger.BuildConfig
+import okhttp3.CertificatePinner //2026-04-20 TLS Pinning, SPKI hash
 import okhttp3.Interceptor
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.MultipartBody
@@ -24,6 +25,14 @@ import javax.net.ssl.TrustManagerFactory
 import javax.net.ssl.X509TrustManager
 
 object ApiClient {
+
+    //2026-04-20 TLS Pinning, SPKI hash
+    //최종 apk 릴리즈시 확인 필수!
+    private const val TLS_PINNING_ENABLED = true // false 로 바꾸면 전체 비활성화
+    private val spkiPinner = CertificatePinner.Builder()
+        .add("neo.ultari.co.kr", "sha256/iFvwVyJSxnQdyaUvUERIf+8qk7gRze3612JMwoO3zdU=") // Let's Encrypt E8 Intermediate (exp 2027-03)
+        .add("neo.ultari.co.kr", "sha256/C5+lpZ7tcVwmwQIMcRtPbsQtWLABXhQzejna0wHFr8M=") // ISRG Root X1 (exp 2035-06)
+        .build()
 
     private val json = Json { ignoreUnknownKeys = true }
 
@@ -83,6 +92,8 @@ object ApiClient {
                 if (BuildConfig.DEBUG) {
                     sslSocketFactory(sslContext.socketFactory, activeTrustManager)
                     hostnameVerifier { _, _ -> true }
+                } else if (TLS_PINNING_ENABLED) { //2026-04-20 TLS Pinning, SPKI hash
+                    certificatePinner(spkiPinner) //2026-04-20 TLS Pinning, SPKI hash
                 }
             }
             .connectTimeout(5, TimeUnit.SECONDS)
@@ -96,6 +107,8 @@ object ApiClient {
                 if (BuildConfig.DEBUG) {
                     sslSocketFactory(sslContext.socketFactory, activeTrustManager)
                     hostnameVerifier { _, _ -> true }
+                } else if (TLS_PINNING_ENABLED) { //2026-04-20 TLS Pinning, SPKI hash
+                    certificatePinner(spkiPinner) //2026-04-20 TLS Pinning, SPKI hash
                 }
             }
             .connectTimeout(5, TimeUnit.SECONDS)

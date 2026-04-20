@@ -1325,12 +1325,13 @@ class MainActivity : AppCompatActivity() {
                                 u.put("icon", icon)
                                 if (isMe) {
                                     val serverNick = u.optString("nick")
-                                    if (serverNick.isNotEmpty()) {
-                                        // 서버 nick이 있으면 로컬 캐시 갱신 (다른 기기에서 변경된 경우 반영)
-                                        if (serverNick != myNick) appConfig.saveMyNick(serverNick)
-                                    } else if (myNick.isNotEmpty()) {
-                                        // 서버가 빈값으로 내려줘도 로컬 저장값으로 복원
+                                    if (myNick.isNotEmpty()) {
+                                        // 로컬 저장값 우선: REST setNick은 서버 presence 캐시를 즉시 갱신하지 않으므로
+                                        // subscribe 응답의 서버 nick이 구버전일 수 있음. 실시간 변경은 PUBLISH Nick으로 수신.
                                         u.put("nick", myNick)
+                                    } else if (serverNick.isNotEmpty()) {
+                                        // 로컬이 비어있을 때만 서버값 채택 (초기 로그인 등)
+                                        appConfig.saveMyNick(serverNick)
                                     }
                                 }
                             }

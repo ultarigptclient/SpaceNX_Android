@@ -24,6 +24,7 @@ import java.net.InetSocketAddress
 import java.nio.ByteBuffer
 import java.nio.channels.AsynchronousSocketChannel
 import java.nio.channels.CompletionHandler
+import java.security.MessageDigest //2026-04-20 TLS Pinning, SPKI hash
 import java.security.SecureRandom
 import java.util.Base64
 import java.util.concurrent.TimeUnit
@@ -31,6 +32,7 @@ import java.util.concurrent.atomic.AtomicInteger
 import javax.net.ssl.SSLEngine
 import javax.net.ssl.SSLEngineResult
 import javax.net.ssl.SSLException
+import net.spacenx.messenger.BuildConfig //2026-04-20 TLS Pinning, SPKI hash
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
@@ -54,6 +56,14 @@ class BinarySocketClient(
         private const val TAG = "BinarySocketClient"
         private const val READ_TIMEOUT_SEC = 42L
         private const val KEEPALIVE_INTERVAL_MS = 40_000L
+
+        //2026-04-20 TLS Pinning, SPKI hash
+        //최종 apk 릴리즈시 확인 필수!
+        private const val SPKI_PINNING_ENABLED = true // false 로 바꾸면 전체 비활성화
+        private val SPKI_PINS = setOf(
+            "iFvwVyJSxnQdyaUvUERIf+8qk7gRze3612JMwoO3zdU=", // Let's Encrypt E8 Intermediate (exp 2027-03)
+            "C5+lpZ7tcVwmwQIMcRtPbsQtWLABXhQzejna0wHFr8M="  // ISRG Root X1 (exp 2035-06)
+        )
     }
 
     // SSL
@@ -89,6 +99,7 @@ class BinarySocketClient(
         initSSL()
         openChannel()
         performHandshake()
+        if (!BuildConfig.DEBUG && SPKI_PINNING_ENABLED) verifySPKIPin() //2026-04-20 TLS Pinning, SPKI hash
         sendWebSocketUpgrade()
         awaitWebSocketUpgrade()
         awaitWhoAU()
@@ -144,6 +155,18 @@ class BinarySocketClient(
         myNetData = ByteBuffer.allocate(session.packetBufferSize)
         peerAppData = ByteBuffer.allocate(session.applicationBufferSize)
         peerNetData = ByteBuffer.allocate(session.packetBufferSize)
+    }
+
+    //2026-04-20 TLS Pinning, SPKI hash
+    private fun verifySPKIPin() {
+        val certs = sslEngine.session.peerCertificates
+        for (cert in certs) {
+            val hash = Base64.getEncoder().encodeToString(
+                MessageDigest.getInstance("SHA-256").digest(cert.publicKey.encoded)
+            )
+            if (hash in SPKI_PINS) return
+        }
+        throw SSLException("TLS pinning failed: no matching SPKI pin for ${config.host}")
     }
 
     // ── TCP 연결 ──
