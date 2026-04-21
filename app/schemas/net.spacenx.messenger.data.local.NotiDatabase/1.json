@@ -2,7 +2,7 @@
   "formatVersion": 1,
   "database": {
     "version": 1,
-    "identityHash": "77d56224873f68b8e5fd580504f0c8ad",
+    "identityHash": "8f6551f8b1e4f948da9ca7a1f3634cb4",
     "entities": [
       {
         "tableName": "notis",
@@ -75,7 +75,17 @@
             "notiCode"
           ]
         },
-        "indices": [],
+        "indices": [
+          {
+            "name": "index_notis_sendDate",
+            "unique": false,
+            "columnNames": [
+              "sendDate"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_notis_sendDate` ON `${TABLE_NAME}` (`sendDate`)"
+          }
+        ],
         "foreignKeys": []
       },
       {
@@ -146,7 +156,7 @@
     "views": [],
     "setupQueries": [
       "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
-      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '77d56224873f68b8e5fd580504f0c8ad')"
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '8f6551f8b1e4f948da9ca7a1f3634cb4')"
     ]
   }
 }

@@ -45,6 +45,44 @@ class PushEventRouter(
                     try {
                         val data = JSONObject(frame.bodyAsString())
 
+                        // DualConnectionKick: 중복 로그인 → 토큰 삭제 후 강제 로그아웃
+                        if (cmd == ProtocolCommand.DUAL_CONNECTION_KICK) {
+                            Log.w(TAG, "DualConnectionKickEvent: another device connected, forcing logout")
+                            appConfig.clearTokens()
+                            appConfig.clearCredentials()
+                            activity.runOnUiThread { bridgeDispatcher.notifyReact("forceLogout") }
+                            return@launch
+                        }
+
+                        // QueueOverflow: 서버 push queue(500 frames) clear됨 → 도메인별 delta 재싱크.
+                        // 서버 event 테이블은 보존(retention ≥14일)되므로 stored offset부터 sync하면 드랍 이벤트 복구됨.
+                        // 도메인별 독립 실행: 한 sync 실패/지연이 다른 도메인을 막지 않게.
+                        if (cmd == ProtocolCommand.QUEUE_OVERFLOW) {
+                            Log.w(TAG, "QueueOverflow: triggering full delta resync")
+                            val uid = appConfig.getSavedUserId() ?: ""
+                            scope.launch {
+                                if (uid.isNotEmpty()) {
+                                    try { loginViewModel.channelRepo.syncChannel(uid) }
+                                    catch (e: Exception) { Log.w(TAG, "QueueOverflow syncChannel failed: ${e.message}") }
+                                    try { loginViewModel.channelRepo.syncChat(uid) }
+                                    catch (e: Exception) { Log.w(TAG, "QueueOverflow syncChat failed: ${e.message}") }
+                                }
+                                bridgeDispatcher.notifyReact("channelReady")
+                                bridgeDispatcher.notifyReactOnce("chatReady")
+                            }
+                            scope.launch {
+                                try { loginViewModel.messageRepo.syncMessage() }
+                                catch (e: Exception) { Log.w(TAG, "QueueOverflow syncMessage failed: ${e.message}") }
+                                bridgeDispatcher.notifyReact("messageReady")
+                            }
+                            scope.launch {
+                                try { loginViewModel.notiRepo.syncNoti() }
+                                catch (e: Exception) { Log.w(TAG, "QueueOverflow syncNoti failed: ${e.message}") }
+                                bridgeDispatcher.notifyReact("notiReady")
+                            }
+                            return@launch
+                        }
+
                         // 로컬 DB 적용
                         loginViewModel.pushEventHandler.applyToLocalDb(cmd.code, data)
 
@@ -89,6 +127,17 @@ class PushEventRouter(
                         // React onPush('Icon'/'Nick') 핸들러가 _mergePresenceGlobal 처리
                         Log.d("Presence", "[6] ${cmd.protocol}→React: $data")
                         bridgeDispatcher.forwardPushToReact(cmd.protocol, data)
+
+                        // ReadNotiEvent / DeleteNotiEvent → notiReady
+                        if (cmd == ProtocolCommand.READ_NOTI_EVENT ||
+                            cmd == ProtocolCommand.DELETE_NOTI_EVENT) {
+                            bridgeDispatcher.notifyReact("notiReady")
+                        }
+
+                        // MuteChannelEvent → channelReady (React 뮤트 토글 상태 갱신)
+                        if (cmd == ProtocolCommand.MUTE_CHANNEL_EVENT) {
+                            bridgeDispatcher.notifyReact("channelReady")
+                        }
 
                         // Message 이벤트 → messageReady
                         if (cmd == ProtocolCommand.SEND_MESSAGE_EVENT ||
@@ -228,7 +277,7 @@ class PushEventRouter(
                                 // 도착하지 않은 순간에 고아 SYSTEM 메시지로 배너가 뜨는 것을 방지.
                                 val rawChatType = data.opt("chatType")
                                 val isSystemChat = rawChatType == "SYSTEM" || rawChatType == "system" ||
-                                    (rawChatType is Number && rawChatType.toInt() == 6)
+                                    (rawChatType is Number && (rawChatType.toInt() == 32 || rawChatType.toInt() == 6))
                                 val chCode = data.optString("channelCode", "")
                                 val channelMissing = if (isSystemChat && chCode.isNotEmpty()) {
                                     try {
@@ -332,6 +381,8 @@ class PushEventRouter(
         }
         sm2.onAuthFailed = {
             Log.w(TAG, "Reconnect auth failed — forcing logout")
+            appConfig.clearTokens()
+            appConfig.clearCredentials()
             activity.runOnUiThread { bridgeDispatcher.notifyReact("forceLogout") }
         }
     }

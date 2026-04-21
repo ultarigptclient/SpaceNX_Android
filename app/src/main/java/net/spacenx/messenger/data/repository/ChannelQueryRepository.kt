@@ -97,6 +97,9 @@ class ChannelQueryRepository(
                     val memberObj = JSONObject().apply {
                         put("userId", member.userId)
                         put("offsetDate", offsetMap[member.userId] ?: 0L)
+                        // 2026-04-21 registDate/unregistDate 추가 — 서버 React unread 공식(eligible 필터)용. 서버 미적용 시 무시됨.
+                        put("registDate", member.registDate)
+                        member.unregistDate?.let { put("unregistDate", it) }
                     }
                     val user = userMap[member.userId]
                     if (user != null) {
@@ -145,9 +148,17 @@ class ChannelQueryRepository(
                 val memberUserMap = if (members.isNotEmpty())
                     orgDb.userDao().getByUserIds(members.map { it.userId }).associateBy { it.userId }
                 else emptyMap()
+                // 2026-04-21 offsetMap 조회 추가 — memberList 에 offsetDate/registDate/unregistDate 싣기 위함. 서버 React unread 필터용.
+                val offsetMap = chatDb.channelOffsetDao().getByChannel(channelCode).associate { it.userId to it.offsetDate }
                 val memberArray = JSONArray()
                 for (member in members) {
-                    val memberObj = JSONObject().apply { put("userId", member.userId) }
+                    val memberObj = JSONObject().apply {
+                        put("userId", member.userId)
+                        // 2026-04-21 React unread 공식(eligible 필터)용 필드 추가. 서버 미적용 시 무시됨.
+                        put("offsetDate", offsetMap[member.userId] ?: 0L)
+                        put("registDate", member.registDate)
+                        member.unregistDate?.let { put("unregistDate", it) }
+                    }
                     val user = memberUserMap[member.userId]
                     if (user != null) {
                         val userInfo = JSONObject(user.userInfo)

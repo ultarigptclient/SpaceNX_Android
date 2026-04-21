@@ -115,11 +115,11 @@ class ChatHandler(
             val activeMembers = withContext(Dispatchers.IO) {
                 chatDb.channelMemberDao().getActiveMembersByChannel(channelCode)
             }
-            val memberCount = activeMembers.size
             val allOffsets = withContext(Dispatchers.IO) {
                 chatDb.channelOffsetDao().getByChannel(channelCode)
             }
-            val offsetDates = allOffsets.map { it.offsetDate }
+            val offsetMap = allOffsets.associate { it.userId to it.offsetDate }
+            Log.d(TAG, "getChatList unread-debug: channelCode=$channelCode, activeMembers=${activeMembers.size} ${activeMembers.map { "${it.userId}(reg=${it.registDate})" }}, offsets=${offsetMap.map { "${it.key}=${it.value}" }}")
 
             // 채널의 chatThread 매핑 → chat 객체에 commentCount/threadCode 주입
             val threadMap = withContext(Dispatchers.IO) {
@@ -132,9 +132,11 @@ class ChatHandler(
 
             val chatList = JSONArray()
             for (c in chats) {
-                val unreadCount = if (memberCount > 0) {
-                    (memberCount - offsetDates.count { it >= c.sendDate }).coerceAtLeast(0)
-                } else 0
+                // 메시지 sendDate 시점에 채널 멤버였던 사람만 미확인 대상. registDate<=0 은 레거시 레코드 호환.
+                val eligible = activeMembers.filter { it.registDate <= c.sendDate }
+                val readByEligible = eligible.filter { (offsetMap[it.userId] ?: 0L) >= c.sendDate }
+                val unreadCount = eligible.size - readByEligible.size
+                Log.d(TAG, "getChatList unread-debug: chat=${c.chatCode} sendDate=${c.sendDate} sender=${c.sendUserId} eligible=${eligible.map { it.userId }} read=${readByEligible.map { "${it.userId}@${offsetMap[it.userId]}" }} unread=$unreadCount")
                 val rawAdditional = c.additional ?: ""
                 val sanitized = sanitizeAdditional(rawAdditional)
                 if (rawAdditional != sanitized) {
@@ -352,7 +354,7 @@ class ChatHandler(
                     sendUserId = "",
                     contents = contents,
                     sendDate = sendDate,
-                    chatType = 99
+                    chatType = 32
                 ))
             }
             ctx.resolveToJs("addLocalSystemChat", JSONObject().apply {
@@ -556,6 +558,7 @@ class ChatHandler(
             "TRANSFER" -> 1024
             "DRM" -> 2048
             "IMPORTANT" -> 4096
+            "HTML" -> 8192
             "", null -> 0
             else -> value?.toString()?.toIntOrNull() ?: 0
         }

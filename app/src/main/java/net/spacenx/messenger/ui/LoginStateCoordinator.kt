@@ -77,8 +77,16 @@ class LoginStateCoordinator(
             && pendingSpaUrl != currentUrl
             && !currentUrl.startsWith(appConfig.getSpaBaseUrl())
 
+        // 갤러리/파일 피커 복귀로 인한 소켓 재연결 시 React bridge 이벤트 억제.
+        // OS가 background에서 TCP를 강제 종료하므로 socket reconnect는 필요하나,
+        // WebView 상태는 그대로이므로 orgReady/channelReady 등이 React를 불필요하게 재렌더링함.
+        val isPickerReturn = mainViewModel.isPickingFile
         loginViewModel.startBackgroundSync(
             notifyCallback = { event ->
+                if (isPickerReturn) {
+                    Log.d(TAG, "handleAuthenticated: picker return, suppressing $event")
+                    return@startBackgroundSync
+                }
                 bridgeDispatcher.notifyReact(event)
                 val required = setOf("orgReady", "buddyReady", "channelReady", "messageReady", "notiReady")
                 if (needSkinReload && bridgeDispatcher.completedSyncs.containsAll(required)) {
@@ -241,6 +249,14 @@ class LoginStateCoordinator(
     private fun handleSkinChanged(state: LoginState.SkinChanged) {
         if (mainViewModel.isPickingFile) {
             Log.d(TAG, "SkinChanged: skipped (file picker active)")
+            return
+        }
+        // WebView가 이미 해당 SPA URL을 띄우고 있으면 리로드 불필요.
+        // 포그라운드 복귀 reconnect 시 configCache가 순간적으로 비어 urlBeforeSync(무버전) != urlAfterSync(버전O)
+        // 로 오판되는 케이스 방어 — 파일 피커 복귀 후 채팅방이 통째로 리로드되는 증상의 주 원인.
+        val currentUrl = webView.url ?: ""
+        if (currentUrl == state.spaUrl || currentUrl.startsWith(state.spaUrl)) {
+            Log.d(TAG, "SkinChanged: skipped (WebView already on $currentUrl)")
             return
         }
         Log.d(TAG, "SkinChanged → reload: ${state.spaUrl}")

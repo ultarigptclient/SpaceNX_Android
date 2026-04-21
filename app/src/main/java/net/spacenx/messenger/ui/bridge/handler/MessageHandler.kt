@@ -50,10 +50,22 @@ class MessageHandler(
 
     private suspend fun handleReadMessage(params: Map<String, Any?>) {
         try {
-            val result = withContext(Dispatchers.IO) {
-                ApiClient.postJson(ctx.appConfig.getEndpointByPath("/comm/readmessage"), ctx.paramsToJson(params))
-            }
             val messageCode = ctx.paramStr(params, "messageCode")
+            val sendUserId = ctx.paramStr(params, "sendUserId")
+            // React bridge.js는 native 경로에서 {messageCode, sendUserId}만 보내지만
+            // 서버 ReadMessageRequest는 {readUserId, messageList:[{messageCode, sendUserId}], deviceType}
+            // 구조를 요구. 래핑하지 않으면 서버가 messageList=null 로 받아 no-op 처리되고
+            // 발신자에게 ReadMessageEvent push가 나가지 않음.
+            val body = JSONObject().apply {
+                put("readUserId", ctx.appConfig.getSavedUserId() ?: "")
+                put("messageList", JSONArray().put(
+                    JSONObject().put("messageCode", messageCode).put("sendUserId", sendUserId)
+                ))
+                put("deviceType", "MOBILE")
+            }
+            val result = withContext(Dispatchers.IO) {
+                ApiClient.postJson(ctx.appConfig.getEndpointByPath("/comm/readmessage"), body)
+            }
             if (messageCode.isNotEmpty() && result.optInt("errorCode", -1) == 0) {
                 withContext(Dispatchers.IO) {
                     try { ctx.dbProvider.getMessageDatabase().messageDao().updateState(messageCode, 1) } catch (_: Exception) {}
@@ -70,10 +82,16 @@ class MessageHandler(
 
     private suspend fun handleDeleteMessage(params: Map<String, Any?>) {
         try {
-            val result = withContext(Dispatchers.IO) {
-                ApiClient.postJson(ctx.appConfig.getEndpointByPath("/comm/deletemessage"), ctx.paramsToJson(params))
-            }
             val messageCode = ctx.paramStr(params, "messageCode")
+            // 서버 DeleteMessageRequest: {messageCodeList, deleteUserId, receive}
+            val body = JSONObject().apply {
+                put("messageCodeList", JSONArray().put(messageCode))
+                put("deleteUserId", ctx.appConfig.getSavedUserId() ?: "")
+                put("receive", params["receive"] as? Boolean ?: true)
+            }
+            val result = withContext(Dispatchers.IO) {
+                ApiClient.postJson(ctx.appConfig.getEndpointByPath("/comm/deletemessage"), body)
+            }
             if (messageCode.isNotEmpty() && result.optInt("errorCode", -1) == 0) {
                 withContext(Dispatchers.IO) {
                     try { ctx.dbProvider.getMessageDatabase().messageDao().deleteByMessageCode(messageCode) } catch (_: Exception) {}

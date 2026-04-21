@@ -2,7 +2,7 @@
   "formatVersion": 1,
   "database": {
     "version": 1,
-    "identityHash": "c75cb127dc3141682d0dd21ef54c34cc",
+    "identityHash": "e8def3c6049ec0cd20e362627c3fbd4b",
     "entities": [
       {
         "tableName": "messages",
@@ -105,12 +105,32 @@
             "messageCode"
           ]
         },
-        "indices": [],
+        "indices": [
+          {
+            "name": "index_messages_sendDate",
+            "unique": false,
+            "columnNames": [
+              "sendDate"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_messages_sendDate` ON `${TABLE_NAME}` (`sendDate`)"
+          },
+          {
+            "name": "index_messages_state_sendDate",
+            "unique": false,
+            "columnNames": [
+              "state",
+              "sendDate"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_messages_state_sendDate` ON `${TABLE_NAME}` (`state`, `sendDate`)"
+          }
+        ],
         "foreignKeys": []
       },
       {
         "tableName": "attachs",
-        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`messageCode` TEXT NOT NULL, `filePath` TEXT NOT NULL, `fileName` TEXT NOT NULL, `fileLength` INTEGER NOT NULL, `lastModifiedDate` INTEGER NOT NULL, `originalFileName` TEXT NOT NULL, PRIMARY KEY(`messageCode`, `fileName`))",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`messageCode` TEXT NOT NULL, `filePath` TEXT NOT NULL, `fileName` TEXT NOT NULL, `fileLength` INTEGER NOT NULL, `lastModifiedDate` INTEGER NOT NULL, `originalFileName` TEXT NOT NULL, `fileId` TEXT NOT NULL, PRIMARY KEY(`messageCode`, `fileName`))",
         "fields": [
           {
             "fieldPath": "messageCode",
@@ -145,6 +165,12 @@
           {
             "fieldPath": "originalFileName",
             "columnName": "originalFileName",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "fileId",
+            "columnName": "fileId",
             "affinity": "TEXT",
             "notNull": true
           }
@@ -249,7 +275,7 @@
     "views": [],
     "setupQueries": [
       "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
-      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, 'c75cb127dc3141682d0dd21ef54c34cc')"
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, 'e8def3c6049ec0cd20e362627c3fbd4b')"
     ]
   }
 }

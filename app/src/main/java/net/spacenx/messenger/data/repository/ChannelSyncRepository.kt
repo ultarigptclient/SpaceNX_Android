@@ -422,16 +422,15 @@ class ChannelSyncRepository(
                             "ADD" -> {
                                 val contents = c.optString("contents", "")
                                 // chatType 매핑:
-                                //  - 문자열: "AI"/"ai" → -99, "SYSTEM"/"system" → 99 (실시간 WS 경로)
-                                //  - 숫자: 6 → 99 (서버 sync REST 에서 SYSTEM을 6으로 내려줌 — 입장/퇴장/초대)
-                                //          그 외 숫자는 그대로 유지 (1=TALK 등)
+                                //  - 서버는 @JsonValue 로 항상 비트마스크 int 내려줌 (SYSTEM=32, TEXT=1 등)
+                                //  - 레거시 문자열("AI","SYSTEM") 및 구 숫자(6=SYSTEM) 경로 흡수
                                 val rawChatType = c.opt("chatType")
                                 val resolvedChatType = when {
                                     rawChatType == "AI" || rawChatType == "ai" -> -99
-                                    rawChatType == "SYSTEM" || rawChatType == "system" -> 99
+                                    rawChatType == "SYSTEM" || rawChatType == "system" -> 32
                                     rawChatType is Number -> {
                                         val n = rawChatType.toInt()
-                                        if (n == 6) 99 else n
+                                        if (n == 6) 32 else n  // 레거시 서버 SYSTEM=6 흡수
                                     }
                                     else -> c.optInt("chatType", 0)
                                 }

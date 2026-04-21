@@ -45,6 +45,13 @@ class NeoSendHandler(
                 return
             }
 
+            // mutechannel: 서버가 userId 필수인데 bridge.js가 빠뜨리므로 여기서 주입
+            if (path.endsWith("/comm/mutechannel") || path == "/comm/mutechannel") {
+                if (!body.has("userId") || body.optString("userId").isEmpty()) {
+                    ctx.appConfig.getSavedUserId()?.let { body.put("userId", it) }
+                }
+            }
+
             // 조회 API → SQLite 우선
             val localResult = withContext(Dispatchers.IO) { projectRepo.handleLocally(path, body) }
             if (localResult != null) {

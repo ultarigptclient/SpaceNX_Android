@@ -75,6 +75,7 @@ class NotificationGroupManager(
 ) : GroupNotificationManager {
 
     companion object {
+        private val NO_PHOTO_SENTINEL: Bitmap = Bitmap.createBitmap(1, 1, Bitmap.Config.ALPHA_8)
         private const val TAG = "GroupNotification"
         private const val CHANNEL_ID = "hybrid_web_messenger_channel"
         private const val CHANNEL_NAME = "메신저 알림"
@@ -110,8 +111,10 @@ class NotificationGroupManager(
 
     private val nextId = AtomicInteger(SUMMARY_ID + 1)
 
-    /** 프로필 사진 메모리 캐시 (userId → circular Bitmap) */
+    /** 프로필 사진 메모리 캐시 (userId → circular Bitmap, NO_PHOTO_SENTINEL = 404 확인됨) */
     private val photoCache: LruCache<String, Bitmap> = LruCache(40)
+
+    fun invalidatePhotoCache(userId: String) { photoCache.remove(userId) }
 
     init {
         createNotificationChannel()
@@ -397,15 +400,25 @@ class NotificationGroupManager(
      */
     private fun loadBitmap(userId: String): Bitmap? {
         val cached = photoCache.get(userId)
-        if (cached != null) return cached
+        if (cached != null) return if (cached === NO_PHOTO_SENTINEL) null else cached
 
         return try {
             val baseUrl = appConfig.getRestBaseUrl().trimEnd('/')
             val url = "$baseUrl/photo/$userId"
             val request = okhttp3.Request.Builder().url(url).build()
             val response = ApiClient.okHttpClient.newCall(request).execute()
-            val bytes = response.body?.bytes() ?: return null
-            val raw = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return null
+            if (!response.isSuccessful) {
+                photoCache.put(userId, NO_PHOTO_SENTINEL)
+                return null
+            }
+            val bytes = response.body?.bytes() ?: run {
+                photoCache.put(userId, NO_PHOTO_SENTINEL)
+                return null
+            }
+            val raw = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: run {
+                photoCache.put(userId, NO_PHOTO_SENTINEL)
+                return null
+            }
             val resized = Bitmap.createScaledBitmap(raw, PHOTO_SIZE_PX, PHOTO_SIZE_PX, true)
             val circular = toCircleBitmap(resized)
             photoCache.put(userId, circular)

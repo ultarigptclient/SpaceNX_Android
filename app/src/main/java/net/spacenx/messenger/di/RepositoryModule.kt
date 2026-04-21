@@ -89,8 +89,9 @@ object RepositoryModule {
     fun provideProjectRepository(
         databaseProvider: DatabaseProvider,
         appConfig: AppConfig,
-        sessionManager: SocketSessionManager
-    ): ProjectRepository = ProjectRepository(databaseProvider, appConfig, sessionManager)
+        sessionManager: SocketSessionManager,
+        userNameCache: UserNameCache
+    ): ProjectRepository = ProjectRepository(databaseProvider, appConfig, sessionManager, userNameCache)
 
     @Provides
     @Singleton

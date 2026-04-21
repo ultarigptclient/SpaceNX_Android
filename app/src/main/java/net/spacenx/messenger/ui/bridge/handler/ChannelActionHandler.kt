@@ -142,7 +142,7 @@ class ChannelActionHandler(
         for (i in 0 until channels.length()) {
             val ch = channels.getJSONObject(i)
             val channelCode = ch.optString("channelCode", "")
-            ch.put("muted", ctx.appConfig.isChannelMuted(channelCode))
+            ch.put("muteFlag", ctx.appConfig.isChannelMuted(channelCode))
             val members = ch.optJSONArray("channelMemberList") ?: continue
             for (j in 0 until members.length()) {
                 val m = members.getJSONObject(j)
@@ -498,6 +498,7 @@ class ChannelActionHandler(
                         put("additional", ch.additional)
                         put("channelMemberList", memberArr)
                         put("memberCount", members.size)
+                        put("muteFlag", ctx.appConfig.isChannelMuted(channelCode))
                     }
                 } else {
                     val body = JSONObject().put("channelCode", channelCode)

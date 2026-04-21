@@ -71,7 +71,7 @@ object ApiClient {
         for (attempt in 0..2) {
             try {
                 val response = chain.proceed(chain.request())
-                if (response.isSuccessful || attempt >= 2) return@Interceptor response
+                if (response.isSuccessful || response.code in 400..499 || attempt >= 2) return@Interceptor response
                 response.close()
             } catch (e: java.io.IOException) {
                 lastException = e
@@ -441,7 +441,12 @@ object ApiClient {
         val raw = response.body?.string() ?: "{}"
         android.util.Log.d("ApiClient", "uploadFileStream: url=$uploadUrl, file=$fileName, size=$contentLength, status=${response.code}, bodyLen=${raw.length}, preview=${raw.take(400)}")
         if (!response.isSuccessful) {
-            throw java.io.IOException("HTTP ${response.code}: ${raw.take(200)}")
+            val msg = when (response.code) {
+                413 -> "파일 크기가 너무 큽니다"
+                401, 403 -> "업로드 권한이 없습니다"
+                else -> "업로드 실패 (${response.code})"
+            }
+            throw java.io.IOException(msg)
         }
         return try { JSONObject(raw) } catch (_: Exception) { JSONObject().put("raw", raw) }
     }

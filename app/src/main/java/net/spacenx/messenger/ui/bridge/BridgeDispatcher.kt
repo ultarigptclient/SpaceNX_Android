@@ -508,8 +508,10 @@ class BridgeDispatcher(
                     Log.d(TAG, "openSmsSendPage: not supported on Android, resolving OK")
                     resolveToJs("openSmsSendPage", JSONObject().put("errorCode", 0))
                 }
+                // 데스크톱(Win/Mac/Tauri) 전용 액션 — 모바일 UI는 보기/정렬 메뉴를 숨겨
+                // React에서 호출 경로가 존재하지 않음. 만일의 경우를 대비한 방어적 no-op.
                 "setUserDisplayMode", "setUserSortMode" -> scope.launch {
-                    Log.d(TAG, "$action: UI-only preference, resolving OK")
+                    Log.d(TAG, "$action: desktop-only action (mobile UI hides the menu); no-op guard")
                     resolveToJs(action, JSONObject().put("errorCode", 0))
                 }
 

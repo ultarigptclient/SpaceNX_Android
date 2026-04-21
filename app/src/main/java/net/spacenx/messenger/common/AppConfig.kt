@@ -132,6 +132,20 @@ class AppConfig(private val context: Context) {
 
     fun getConfigValue(key: String): String? = configCache[key]
 
+    /**
+     * SPA 404 fallback 용 — FRONTEND_SKIN / FRONTEND_VERSION 을 캐시와 SharedPreferences 양쪽에서 제거.
+     * Admin DB가 배포되지 않은 skin/version 을 내려줄 때 whitelabel 방지.
+     */
+    fun clearFrontendConfig() {
+        configCache.remove("FRONTEND_SKIN")
+        configCache.remove("FRONTEND_VERSION")
+        context.getSharedPreferences(PREF_DEVICE, Context.MODE_PRIVATE).edit()
+            .remove("FRONTEND_SKIN")
+            .remove("FRONTEND_VERSION")
+            .apply()
+    }
+
+    //https://neo.ultari.co.kr:18019/static/nst/index.html
     /** FRONTEND_SKIN 기반 SPA base URL 계산 (nx → nst 등) */
     fun getSpaBaseUrl(): String {
         val skin = configCache["FRONTEND_SKIN"]

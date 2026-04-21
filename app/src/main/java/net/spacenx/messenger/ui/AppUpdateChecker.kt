@@ -88,11 +88,11 @@ class AppUpdateChecker(
                 }
                 Log.d(TAG, "Update check server version=${updateInfo.version}, url=${updateInfo.downloadUrl}")
                 val currentVersion = activity.packageManager.getPackageInfo(activity.packageName, 0).versionName ?: ""
-                if (updateInfo.version != currentVersion) {
+                if (compareVersions(updateInfo.version, currentVersion) > 0) {
                     Log.d(TAG, "Update available: $currentVersion → ${updateInfo.version}")
                     activity.runOnUiThread { showForceUpdateDialog(updateInfo.version, updateInfo.downloadUrl) }
                 } else {
-                    Log.d(TAG, "App is up to date: $currentVersion")
+                    Log.d(TAG, "App is up to date: current=$currentVersion, server=${updateInfo.version}")
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Update check error", e)
@@ -323,6 +323,21 @@ class AppUpdateChecker(
             Log.e(TAG, "verifyApkSignature failed", e)
             false
         }
+    }
+
+    /**
+     * "8.4.10" vs "8.4.8" 같이 세그먼트별 숫자 비교.
+     * 길이가 다르면 짧은 쪽을 0으로 패딩. 숫자 파싱 실패 세그먼트는 0 취급.
+     */
+    private fun compareVersions(a: String, b: String): Int {
+        val pa = a.split('.').map { it.toIntOrNull() ?: 0 }
+        val pb = b.split('.').map { it.toIntOrNull() ?: 0 }
+        val n = maxOf(pa.size, pb.size)
+        for (i in 0 until n) {
+            val diff = pa.getOrElse(i) { 0 } - pb.getOrElse(i) { 0 }
+            if (diff != 0) return diff
+        }
+        return 0
     }
 
     private fun parseUpdateResponse(body: String): UpdateInfo? {

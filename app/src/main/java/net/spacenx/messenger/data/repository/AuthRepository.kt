@@ -100,8 +100,7 @@ class AuthRepository(
                 Log.d(TAG, "login: Authenticated emitted, proceeding to syncConfig + socket")
 
                 // ③ syncConfig (백그라운드 — JS는 이미 메인 화면 전환)
-                val syncConfigOk = syncConfig(username)
-                if (!syncConfigOk) {
+                if (syncConfig(username) == null) {
                     Log.w(TAG, "login: syncConfig failed, but already authenticated")
                     // Authenticated 이후이므로 Failed 대신 경고만 (React는 이미 메인 화면)
                 }
@@ -186,15 +185,21 @@ class AuthRepository(
                 Log.d(TAG, "reconnect: Authenticated emitted, proceeding to syncConfig + socket")
 
                 // ③ syncConfig (백그라운드 — JS는 이미 메인 화면 전환)
+                // SkinChanged는 서버가 실제로 FRONTEND_SKIN/VERSION 델타를 내려줬을 때만 emit.
+                // 단순 URL 비교는 loadInitialConfigCache(DB→cache 비동기) 와 urlBeforeSync 가 경쟁하면
+                // 서버 변경 없이도 오판해서 whitelabel 404 유발 — 서버 delta key 존재 여부로 판단해야 안전.
                 val urlBeforeSync = appConfig.getSpaUrl()
-                val syncConfigOk = syncConfig(userId)
-                if (!syncConfigOk) {
+                val receivedKeys = syncConfig(userId)
+                if (receivedKeys == null) {
                     Log.w(TAG, "reconnect: syncConfig failed, but already authenticated")
                 } else {
-                    val urlAfterSync = appConfig.getSpaUrl()
-                    if (urlAfterSync != urlBeforeSync) {
-                        Log.d(TAG, "reconnect: FRONTEND_SKIN changed → SkinChanged: $urlBeforeSync → $urlAfterSync")
-                        sessionManager.emitLoginState(LoginState.SkinChanged(urlAfterSync))
+                    val skinOrVersionInDelta = "FRONTEND_SKIN" in receivedKeys || "FRONTEND_VERSION" in receivedKeys
+                    if (skinOrVersionInDelta) {
+                        val urlAfterSync = appConfig.getSpaUrl()
+                        if (urlAfterSync != urlBeforeSync) {
+                            Log.d(TAG, "reconnect: FRONTEND_SKIN/VERSION in delta → SkinChanged: $urlBeforeSync → $urlAfterSync")
+                            sessionManager.emitLoginState(LoginState.SkinChanged(urlAfterSync))
+                        }
                     }
                 }
 
@@ -345,7 +350,11 @@ class AuthRepository(
      * - lastSyncTime → syncMeta 저장
      * - 새 accessToken 갱신
      */
-    private suspend fun syncConfig(userId: String): Boolean {
+    /**
+     * @return 서버에서 이번 응답에 포함한 config 키 집합. null = 요청 실패(네트워크/HTTP/errorCode).
+     *         빈 Set은 "서버가 델타 없음 반환" = 아무 것도 변하지 않았다는 의미이며 SkinChanged 판단에 사용.
+     */
+    private suspend fun syncConfig(userId: String): Set<String>? {
         Log.d(TAG, "syncConfig() called for user: $userId")
         FileLogger.log(TAG, "syncConfig REQ userId=$userId")
         try {
@@ -361,13 +370,13 @@ class AuthRepository(
             if (response.code() == 401 || response.code() == 403) {
                 Log.e(TAG, "syncConfig auth error: ${response.code()}")
                 FileLogger.log(TAG, "syncConfig AUTH ERROR code=${response.code()}")
-                return false
+                return null
             }
 
             if (!response.isSuccessful) {
                 Log.e(TAG, "syncConfig HTTP error: ${response.code()}")
                 FileLogger.log(TAG, "syncConfig HTTP ERROR code=${response.code()}")
-                return false
+                return null
             }
 
             val rawJson = response.body()?.string()?.takeIf { it.isNotEmpty() } ?: "{}"
@@ -377,7 +386,7 @@ class AuthRepository(
 
             if (errorCode != 0) {
                 Log.e(TAG, "syncConfig error: errorCode=$errorCode")
-                return false
+                return null
             }
 
             // 새 accessToken 갱신
@@ -424,11 +433,11 @@ class AuthRepository(
             Log.d(TAG, "syncConfig complete: serverTime=$serverTime, configs=${configEntities.size}")
             FileLogger.log(TAG, "syncConfig DONE configs=${configEntities.size} serverTime=$serverTime")
 
-            return true
+            return configMap.keys
         } catch (e: Exception) {
             Log.e(TAG, "syncConfig error: ${e.message}", e)
             FileLogger.log(TAG, "syncConfig ERROR ${e.message}")
-            return false
+            return null
         }
     }
 

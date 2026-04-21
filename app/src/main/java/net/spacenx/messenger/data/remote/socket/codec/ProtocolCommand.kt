@@ -57,6 +57,7 @@ enum class ProtocolCommand(val code: Int, val protocol: String) {
     DELETE_COMMENT_EVENT(0x029A, "DeleteCommentEvent"),
     NICK_EVENT(0x029B, "Nick"),
     MOBILE_ICN_EVENT(0x029C, "MobileICN"),
+    MUTE_CHANNEL_EVENT(0x029D, "MuteChannelEvent"),
 
     // ── Org ──
     SYNC_ORG(0x030A, "SyncOrg"),
@@ -84,6 +85,8 @@ enum class ProtocolCommand(val code: Int, val protocol: String) {
     ReadNoti(0x0703, "ReadNoti"),
     DELETE_NOTI(0x0704, "DeleteNoti"),
     NOTIFY_EVENT(0x0780, "NotifyEvent"),
+    READ_NOTI_EVENT(0x0781, "ReadNotiEvent"),
+    DELETE_NOTI_EVENT(0x0782, "DeleteNotiEvent"),
     NOTIFICATION_EVENT(0x0783, "NotificationEvent"),
 
     // ── Noti Badge ──
@@ -99,6 +102,8 @@ enum class ProtocolCommand(val code: Int, val protocol: String) {
     @Deprecated("Use LOGOUT_CMD") LOGOUT(0x0A02, "Logout"),
     TIME_REQUEST(0x0A07, "timeRequest"),
     NOOP(0x0A09, "noop"),
+    QUEUE_OVERFLOW(0x0A0F, "QueueOverflow"),
+    DUAL_CONNECTION_KICK(0x0A10, "DualConnectionKickEvent"),
 
     // ── Message (Note) ──
     SEND_MESSAGE(0x0B01, "SendMessage"),
@@ -128,11 +133,12 @@ enum class ProtocolCommand(val code: Int, val protocol: String) {
             MAKE_CHANNEL_EVENT, ADD_CHANNEL_MEMBER_EVENT, DESTROY_CHANNEL_EVENT,
             REMOVE_CHANNEL_MEMBER_EVENT, MOD_CHANNEL_EVENT, REMOVE_CHANNEL_EVENT, SET_CHANNEL_EVENT,
             KICK_USER_EVENT, DELETE_CHAT_THREAD_EVENT, ADD_COMMENT_EVENT, DELETE_COMMENT_EVENT,
-            NICK_EVENT, MOBILE_ICN_EVENT,
+            NICK_EVENT, MOBILE_ICN_EVENT, MUTE_CHANNEL_EVENT,
             SEND_MESSAGE_EVENT, READ_MESSAGE_EVENT, DELETE_MESSAGE_EVENT, RETRIEVE_MESSAGE_EVENT,
-            ICON_EVENT, NOTIFY_EVENT, NOTIFICATION_EVENT,
+            ICON_EVENT, NOTIFY_EVENT, READ_NOTI_EVENT, DELETE_NOTI_EVENT, NOTIFICATION_EVENT,
             SET_CONFIG,
-            ORG_USER_EVENT, ORG_DEPT_EVENT, ORG_USER_REMOVED_EVENT, ORG_DEPT_REMOVED_EVENT
+            ORG_USER_EVENT, ORG_DEPT_EVENT, ORG_USER_REMOVED_EVENT, ORG_DEPT_REMOVED_EVENT,
+            QUEUE_OVERFLOW, DUAL_CONNECTION_KICK
         )
 
         fun isPushEvent(code: Int): Boolean =

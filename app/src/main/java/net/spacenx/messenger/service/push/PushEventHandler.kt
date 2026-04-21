@@ -115,7 +115,12 @@ class PushEventHandler(
                     ProtocolCommand.ORG_DEPT_EVENT.code,
                     ProtocolCommand.ORG_USER_REMOVED_EVENT.code,
                     ProtocolCommand.ORG_DEPT_REMOVED_EVENT.code -> handleOrgEvent(commandCode, data)
-                    ProtocolCommand.TYPING_CHAT_EVENT.code -> { /* typing indicator — ephemeral, no DB action */ }
+                    ProtocolCommand.MUTE_CHANNEL_EVENT.code -> handleMuteChannelEvent(data)
+                    ProtocolCommand.READ_NOTI_EVENT.code -> handleReadNotiEvent(data)
+                    ProtocolCommand.DELETE_NOTI_EVENT.code -> handleDeleteNotiEvent(data)
+                    ProtocolCommand.TYPING_CHAT_EVENT.code -> { /* ephemeral, no DB action */ }
+                    ProtocolCommand.QUEUE_OVERFLOW.code,
+                    ProtocolCommand.DUAL_CONNECTION_KICK.code -> { /* handled in PushEventRouter */ }
                     else -> Log.w(TAG, "Unknown push commandCode: 0x${Integer.toHexString(commandCode)}")
                 }
             } catch (e: Exception) {
@@ -135,16 +140,15 @@ class PushEventHandler(
         val additional = data.optJSONObject("additional")?.toString()
 
         // chatType 매핑:
-        //  - 문자열: "AI"/"ai" → -99, "SYSTEM"/"system" → 99
-        //  - 숫자 6 → 99 (서버가 SYSTEM을 6으로 내려주는 경우 방어)
-        //  - 그 외 숫자는 그대로 유지
+        //  - 서버는 @JsonValue 로 항상 비트마스크 int 내려줌 (SYSTEM=32, TEXT=1 등)
+        //  - 레거시 문자열("AI","SYSTEM") 및 구 숫자(6=SYSTEM) 경로 흡수
         val rawChatType = data.opt("chatType")
         val isAiChat = rawChatType == "AI" || rawChatType == "ai"
         val isSystemChat = rawChatType == "SYSTEM" || rawChatType == "system" ||
-            (rawChatType is Number && rawChatType.toInt() == 6)
+            (rawChatType is Number && (rawChatType.toInt() == 32 || rawChatType.toInt() == 6))
         val chatType = when {
             isAiChat -> -99
-            isSystemChat -> 99
+            isSystemChat -> 32
             rawChatType is Number -> rawChatType.toInt()
             else -> data.optInt("chatType", 0)
         }
@@ -811,6 +815,49 @@ class PushEventHandler(
             }
         } catch (e: Exception) {
             Log.e(TAG, "handleOrgEvent DB error: ${e.message}", e)
+        }
+    }
+
+    // ── 0x029D MuteChannelEvent: 채널 뮤트 상태 → AppConfig 반영 (현재 유저만) ──
+
+    private fun handleMuteChannelEvent(data: JSONObject) {
+        val channelCode = data.optString("channelCode", "")
+        val userId = data.optString("userId", "")
+        val myUserId = appConfig.getSavedUserId() ?: ""
+        if (channelCode.isEmpty() || userId != myUserId) return
+        val muteFlag = data.optInt("muteFlag", -1)
+        val mute = when {
+            muteFlag >= 0 -> muteFlag != 0
+            data.has("mute") -> data.optBoolean("mute", false)
+            else -> return
+        }
+        if (mute) appConfig.muteChannel(channelCode) else appConfig.unmuteChannel(channelCode)
+        Log.d(TAG, "handleMuteChannelEvent: channelCode=$channelCode mute=$mute")
+    }
+
+    // ── 0x0781 ReadNotiEvent: 알림 읽음 처리 ──
+
+    private suspend fun handleReadNotiEvent(data: JSONObject) {
+        val notiCode = data.optString("notiCode", "")
+        if (notiCode.isEmpty()) return
+        try {
+            dbProvider.getNotiDatabase().notiDao().markAsRead(notiCode)
+            Log.d(TAG, "handleReadNotiEvent: notiCode=$notiCode marked read")
+        } catch (e: Exception) {
+            Log.e(TAG, "handleReadNotiEvent error: ${e.message}", e)
+        }
+    }
+
+    // ── 0x0782 DeleteNotiEvent: 알림 로컬 삭제 ──
+
+    private suspend fun handleDeleteNotiEvent(data: JSONObject) {
+        val notiCode = data.optString("notiCode", "")
+        if (notiCode.isEmpty()) return
+        try {
+            dbProvider.getNotiDatabase().notiDao().deleteByNotiCode(notiCode)
+            Log.d(TAG, "handleDeleteNotiEvent: notiCode=$notiCode deleted")
+        } catch (e: Exception) {
+            Log.e(TAG, "handleDeleteNotiEvent error: ${e.message}", e)
         }
     }
 

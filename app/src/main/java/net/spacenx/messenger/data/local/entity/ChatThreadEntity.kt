@@ -9,5 +9,6 @@ data class ChatThreadEntity(
     val channelCode: String = "",
     val commentCount: Int = 0,
     val createdDate: Long = 0L,
-    val chatContents: String = ""
+    val chatContents: String = "",
+    val creatorUserId: String = ""
 )

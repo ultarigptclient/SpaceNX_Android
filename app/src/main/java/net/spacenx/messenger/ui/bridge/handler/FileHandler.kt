@@ -382,18 +382,25 @@ class FileHandler(
     }
 
     /**
-     * chat 첨부용 업로드 — pickFile이 cacheDir에 저장한 임시 파일을 /media/file/upload로 stream upload.
-     * 진행률은 window.postMessage('uploadProgress') 이벤트로 emit.
+     * chat 첨부용 업로드 — bridge.js 2단계 프로토콜:
+     * 1) resolve({errorCode:0, sessionId}) → React가 listener 준비 완료
+     * 2) postMessage({event:"fileUploadCompleted", sessionId, result:{...}}) → sendChat 트리거
+     * 진행률: postMessage({event:"fileUploadProgress", sessionId, percent})
      */
     private suspend fun handleChatUploadByTempId(nativeTempId: String, cbId: String) {
+        val tempDir = java.io.File(ctx.activity.cacheDir, "pickedFiles")
+        val tempFile = java.io.File(tempDir, nativeTempId)
+        if (!tempFile.exists()) {
+            ctx.rejectToJs(cbId, "Temp file not found: $nativeTempId")
+            return
+        }
+        val fileName = tempFile.name.substringAfter('_', tempFile.name)
+        val sessionId = nativeTempId
+
+        // 1단계: sessionId만 즉시 resolve → React listener가 fileUploadCompleted 이벤트 대기
+        ctx.resolveToJs(cbId, JSONObject().put("errorCode", 0).put("sessionId", sessionId))
+
         try {
-            val tempDir = java.io.File(ctx.activity.cacheDir, "pickedFiles")
-            val tempFile = java.io.File(tempDir, nativeTempId)
-            if (!tempFile.exists()) {
-                ctx.rejectToJs(cbId, "Temp file not found: $nativeTempId")
-                return
-            }
-            val fileName = tempFile.name.substringAfter('_', tempFile.name)
             val mime = android.webkit.MimeTypeMap.getSingleton()
                 .getMimeTypeFromExtension(java.io.File(fileName).extension) ?: "application/octet-stream"
             val uploadUrl = ctx.appConfig.getEndpointByPath("/media/file/upload")
@@ -401,26 +408,37 @@ class FileHandler(
             val result = withContext(Dispatchers.IO) {
                 ApiClient.uploadFileStream(tempFile, fileName, mime, uploadUrl, token) { sent, total ->
                     val pct = if (total > 0) (sent * 100 / total).toInt() else 0
-                    val progressJson = JSONObject()
-                        .put("event", "uploadProgress")
-                        .put("progress", pct)
-                        .put("fileName", fileName)
-                    ctx.evalJsMain("window.postMessage('${ctx.esc(progressJson.toString())}')")
+                    val ev = JSONObject()
+                        .put("event", "fileUploadProgress")
+                        .put("sessionId", sessionId)
+                        .put("percent", pct)
+                    ctx.evalJsMain("window.postMessage('${ctx.esc(ev.toString())}')")
                 }
             }
             val uploadedUrl = result.optString("url", result.optString("fileUrl", ""))
             val fileId = result.optString("fileId", "")
-            Log.d(TAG, "chatUpload result: file=$fileName, size=${tempFile.length()}, url='$uploadedUrl', fileId='$fileId', keys=${result.keys().asSequence().toList()}, raw=${result.toString().take(400)}")
-            ctx.resolveToJs(cbId, JSONObject()
+            Log.d(TAG, "chatUpload result: file=$fileName, size=${tempFile.length()}, url='$uploadedUrl', fileId='$fileId'")
+
+            // 2단계: fileUploadCompleted 이벤트 → React가 sendChat 호출
+            val resultJson = JSONObject()
                 .put("errorCode", 0)
                 .put("fileName", fileName)
                 .put("fileSize", tempFile.length())
                 .put("url", uploadedUrl)
-                .put("fileId", fileId))
+                .put("fileId", fileId)
+            val ev = JSONObject()
+                .put("event", "fileUploadCompleted")
+                .put("sessionId", sessionId)
+                .put("result", resultJson)
+            ctx.evalJsMain("window.postMessage('${ctx.esc(ev.toString())}')")
             try { tempFile.delete() } catch (_: Exception) {}
         } catch (e: Exception) {
             Log.e(TAG, "uploadFile(tempId) error: ${e.message}", e)
-            ctx.rejectToJs(cbId, e.message)
+            val ev = JSONObject()
+                .put("event", "fileUploadFailed")
+                .put("sessionId", sessionId)
+                .put("error", e.message ?: "Upload failed")
+            ctx.evalJsMain("window.postMessage('${ctx.esc(ev.toString())}')")
         }
     }
 

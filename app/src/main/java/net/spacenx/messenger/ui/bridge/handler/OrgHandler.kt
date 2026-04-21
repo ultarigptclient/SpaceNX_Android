@@ -346,7 +346,9 @@ class OrgHandler(
 
     private suspend fun handleCreateSubGroup(params: Map<String, Any?>) {
         try {
+            Log.d(TAG, "createSubGroup: params=$params")
             val parentId = paramGroupId(params)
+            Log.d(TAG, "createSubGroup: resolved parentId='$parentId'")
             if (parentId.isEmpty()) {
                 ctx.rejectToJs("createSubGroup", "groupId required")
                 return

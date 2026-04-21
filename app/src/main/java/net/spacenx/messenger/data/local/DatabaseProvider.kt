@@ -203,7 +203,7 @@ class DatabaseProvider(private val context: Context) {
         val db = Room.databaseBuilder(context, ChatDatabase::class.java, dbFile.absolutePath)
             .openHelperFactory(openHelperFactory)
             .setJournalMode(RoomDatabase.JournalMode.TRUNCATE)
-            .addMigrations(ChatDatabase.MIGRATION_1_2, ChatDatabase.MIGRATION_2_3, ChatDatabase.MIGRATION_3_4)
+            .fallbackToDestructiveMigration()
             .build()
         chatDb = db
         return db
@@ -217,7 +217,7 @@ class DatabaseProvider(private val context: Context) {
         val db = Room.databaseBuilder(context, MessageDatabase::class.java, dbFile.absolutePath)
             .openHelperFactory(openHelperFactory)
             .setJournalMode(RoomDatabase.JournalMode.TRUNCATE)
-            .addMigrations(MessageDatabase.MIGRATION_1_2, MessageDatabase.MIGRATION_2_3)
+            .fallbackToDestructiveMigration()
             .build()
         messageDb = db
         return db
@@ -231,7 +231,7 @@ class DatabaseProvider(private val context: Context) {
         val db = Room.databaseBuilder(context, NotiDatabase::class.java, dbFile.absolutePath)
             .openHelperFactory(openHelperFactory)
             .setJournalMode(RoomDatabase.JournalMode.TRUNCATE)
-            .addMigrations(NotiDatabase.MIGRATION_1_2)
+            .fallbackToDestructiveMigration()
             .build()
         notiDb = db
         return db
@@ -245,10 +245,7 @@ class DatabaseProvider(private val context: Context) {
         val db = Room.databaseBuilder(context, ProjectDatabase::class.java, dbFile.absolutePath)
             .openHelperFactory(openHelperFactory)
             .setJournalMode(RoomDatabase.JournalMode.TRUNCATE)
-            .addMigrations(
-                ProjectDatabase.MIGRATION_1_2, ProjectDatabase.MIGRATION_2_3,
-                ProjectDatabase.MIGRATION_3_4, ProjectDatabase.MIGRATION_4_5
-            )
+            .fallbackToDestructiveMigration()
             .build()
         projectDb = db
         return db

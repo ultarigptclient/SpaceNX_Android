@@ -13,6 +13,7 @@ import net.spacenx.messenger.data.local.ChatDatabase
 import net.spacenx.messenger.data.local.DatabaseProvider
 import net.spacenx.messenger.data.local.entity.*
 import java.util.Calendar as JavaCalendar
+import net.spacenx.messenger.data.cache.UserNameCache
 import net.spacenx.messenger.data.remote.api.ApiClient
 import net.spacenx.messenger.service.socket.SocketSessionManager
 import okhttp3.MediaType.Companion.toMediaType
@@ -26,7 +27,8 @@ import org.json.JSONObject
 class ProjectRepository(
     private val dbProvider: DatabaseProvider,
     private val appConfig: AppConfig,
-    private val sessionManager: SocketSessionManager? = null
+    private val sessionManager: SocketSessionManager? = null,
+    private val userNameCache: UserNameCache? = null
 ) {
     companion object {
         private const val TAG = "ProjectRepository"
@@ -515,7 +517,10 @@ class ProjectRepository(
                             channelCode = channelCode,
                             commentCount = event.optInt("commentCount", 0),
                             createdDate = event.optLong("createdDate", 0L),
-                            chatContents = event.optString("chatContents", "")
+                            chatContents = event.optString("chatContents", ""),
+                            creatorUserId = event.optString("creatorUserId", "").ifEmpty {
+                                event.optString("sendUserId", "")
+                            }
                         )))
                     }
                 }
@@ -988,6 +993,7 @@ class ProjectRepository(
                     put("commentCount", t.commentCount)
                     if (t.createdDate > 0) put("createdDate", t.createdDate)
                     if (contents.isNotEmpty()) put("chatContents", contents)
+                    if (t.creatorUserId.isNotEmpty()) put("creatorUserId", t.creatorUserId)
                 })
             }
             issueThreads.forEach { t ->
@@ -1066,7 +1072,7 @@ class ProjectRepository(
         }
     }
 
-    private fun issueToJson(i: IssueEntity): JSONObject {
+    private suspend fun issueToJson(i: IssueEntity): JSONObject {
         return JSONObject().apply {
             put("issueCode", i.issueCode)
             put("projectCode", i.projectCode)
@@ -1078,6 +1084,8 @@ class ProjectRepository(
             put("priority", i.priority)
             put("assigneeUserId", i.assigneeUserId)
             put("reporterUserId", i.reporterUserId)
+            if (i.assigneeUserId.isNotEmpty()) put("assigneeUserName", userNameCache?.resolve(i.assigneeUserId) ?: i.assigneeUserId)
+            if (i.reporterUserId.isNotEmpty()) put("reporterUserName", userNameCache?.resolve(i.reporterUserId) ?: i.reporterUserId)
             put("labels", i.labels)
             if (i.dueDate > 0) put("dueDate", i.dueDate)
             if (i.completedDate > 0) put("completedDate", i.completedDate)
@@ -1090,7 +1098,7 @@ class ProjectRepository(
         }
     }
 
-    private fun issuesToJsonArray(issues: List<IssueEntity>): JSONArray {
+    private suspend fun issuesToJsonArray(issues: List<IssueEntity>): JSONArray {
         return JSONArray().apply { issues.forEach { put(issueToJson(it)) } }
     }
 
@@ -1173,6 +1181,7 @@ class ProjectRepository(
                     put("commentCount", t.commentCount)
                     if (t.createdDate > 0) put("createdDate", t.createdDate)
                     if (contents.isNotEmpty()) put("chatContents", contents)
+                    if (t.creatorUserId.isNotEmpty()) put("creatorUserId", t.creatorUserId)
                 })
             }
         }

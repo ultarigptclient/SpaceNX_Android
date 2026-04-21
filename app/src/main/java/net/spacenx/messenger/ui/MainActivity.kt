@@ -300,6 +300,12 @@ class MainActivity : AppCompatActivity() {
             reconnectJob?.cancel()
             reconnectJob = null
             if (isLoggedIn) {
+                // 파일 피커 사용 중 background는 grace period 타이머를 생략 — OS가 TCP를 먼저 끊으므로
+                // 앱 측에서 별도 disconnect 예약할 필요 없음. 복귀 시 정상 reconnect 처리됨.
+                if (isPickingFile) {
+                    Log.d(TAG, "Background: file picker active, skipping disconnect timer")
+                    return
+                }
                 // 즉시 끊지 않고 grace period 예약 — 짧은 백그라운드는 소켓 유지
                 disconnectJob?.cancel()
                 disconnectJob = lifecycleScope.launch {
@@ -347,10 +353,12 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
-        // Edge-to-edge (targetSdk 35): 시스템 바 영역만큼 루트 뷰에 패딩 적용
+        // Edge-to-edge (targetSdk 35): 시스템 바 + IME(키보드) 영역만큼 루트 뷰에 패딩.
+        // IME 인셋을 bottom에 더해야 키보드 올라올 때 WebView가 줄어들어 입력창/전송 버튼이 가려지지 않음.
         ViewCompat.setOnApplyWindowInsetsListener(findViewById(R.id.rootLayout)) { view, windowInsets ->
-            val insets = windowInsets.getInsets(WindowInsetsCompat.Type.systemBars())
-            view.setPadding(insets.left, insets.top, insets.right, insets.bottom)
+            val sysBars = windowInsets.getInsets(WindowInsetsCompat.Type.systemBars())
+            val ime = windowInsets.getInsets(WindowInsetsCompat.Type.ime())
+            view.setPadding(sysBars.left, sysBars.top, sysBars.right, maxOf(sysBars.bottom, ime.bottom))
             WindowInsetsCompat.CONSUMED
         }
 
@@ -1181,6 +1189,9 @@ class MainActivity : AppCompatActivity() {
         }
 
         webView.webViewClient = object : WebViewClient() {
+            // 1회성 fallback: `/static/nx/index.html` 자체도 404 면 무한 루프 방지
+            private var spaFallbackDone = false
+
             override fun onReceivedSslError(
                 view: WebView?,
                 handler: android.webkit.SslErrorHandler?,
@@ -1188,6 +1199,34 @@ class MainActivity : AppCompatActivity() {
             ) {
                 Log.w(TAG, "SSL error: ${error?.primaryError}, url: ${error?.url}")
                 handler?.proceed()
+            }
+
+            override fun onReceivedHttpError(
+                view: WebView?,
+                request: android.webkit.WebResourceRequest?,
+                errorResponse: android.webkit.WebResourceResponse?
+            ) {
+                super.onReceivedHttpError(view, request, errorResponse)
+                val status = errorResponse?.statusCode ?: 0
+                val isMainFrame = request?.isForMainFrame == true
+                if (!isMainFrame || status != 404 || spaFallbackDone) return
+                spaFallbackDone = true
+                val failedUrl = request?.url?.toString()
+                Log.w(TAG, "SPA 404 on main frame: $failedUrl — clearing FRONTEND_SKIN/VERSION and reloading default")
+                appConfig.clearFrontendConfig()
+                // common.db 의 stale row 도 함께 삭제 — 남겨두면 재시작 시 loadInitialConfigCache 가
+                // 다시 캐시에 부활시켜 같은 404 URL 로 재진입(whitelabel) 하는 문제 차단.
+                lifecycleScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                    try {
+                        val dao = databaseProvider.getCommonDatabase().commonDao()
+                        dao.deleteByKey("FRONTEND_SKIN")
+                        dao.deleteByKey("FRONTEND_VERSION")
+                    } catch (e: Exception) {
+                        Log.w(TAG, "SPA 404 fallback: failed to purge common.db rows: ${e.message}")
+                    }
+                }
+                val fallback = appConfig.getSpaUrl()
+                view?.post { view.loadUrl(fallback) }
             }
 
             override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
@@ -1344,8 +1383,10 @@ class MainActivity : AppCompatActivity() {
                                     if (mobileIcon > 0) mobileIcon else pcIcon
                                 }
                                 u.put("icon", icon)
+                                // null nick → 빈 문자열로 정규화 (React가 "null" 텍스트 표시 방지)
+                                if (u.isNull("nick")) u.put("nick", "")
                                 if (isMe) {
-                                    val serverNick = u.optString("nick")
+                                    val serverNick = u.optString("nick", "")
                                     // AppConfig 저장은 setNick 성공·Nick 소켓 push에서만 수행
                                     // subscribe 스냅샷은 lag이 있어 stale 덮어쓰기 위험 → 표시용으로만 사용
                                     if (myNick.isNotEmpty()) {
