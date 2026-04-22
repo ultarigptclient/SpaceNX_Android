@@ -170,17 +170,15 @@ class DatabaseProvider(private val context: Context) {
         val db = Room.databaseBuilder(context, CommonDatabase::class.java, dbFile.absolutePath)
             .openHelperFactory(openHelperFactory)
             .setJournalMode(RoomDatabase.JournalMode.TRUNCATE)
-            // common.db: REST syncConfig 로 재빌드 가능 (엔드포인트/테마 등 서버 config). destructive OK.
-            .fallbackToDestructiveMigration()
             .build()
         commonDb = db
         return db
     }
 
     // ── 사용자별 DB ──
-    // 데이터 중요 DB(org/chat/message/noti/project)는 destructive fallback 제거.
-    // 스키마 bump 시 명시 migration 추가 없이 배포하면 Room 이 IllegalStateException 으로 크래시 → 개발자가 즉시 인지.
-    // 이전 silent 데이터 전체 삭제 사고 방지. version 을 올리면 반드시 MIGRATION_N_M 작성 필수.
+    // 모든 DB 에서 destructive fallback 제거. 스키마 bump 시 명시 migration 추가 없이 배포하면
+    // Room 이 IllegalStateException 으로 크래시 → 개발자가 즉시 인지. silent 데이터 전체 삭제 방지.
+    // version 을 올리면 반드시 MIGRATION_N_M 작성 필수. (개발 단계는 앱 재설치로 대응)
 
     @Synchronized
     fun getOrgDatabase(): OrgDatabase {
@@ -203,7 +201,6 @@ class DatabaseProvider(private val context: Context) {
         val db = Room.databaseBuilder(context, ChatDatabase::class.java, dbFile.absolutePath)
             .openHelperFactory(openHelperFactory)
             .setJournalMode(RoomDatabase.JournalMode.TRUNCATE)
-            .fallbackToDestructiveMigration()
             .build()
         chatDb = db
         return db
@@ -217,7 +214,6 @@ class DatabaseProvider(private val context: Context) {
         val db = Room.databaseBuilder(context, MessageDatabase::class.java, dbFile.absolutePath)
             .openHelperFactory(openHelperFactory)
             .setJournalMode(RoomDatabase.JournalMode.TRUNCATE)
-            .fallbackToDestructiveMigration()
             .build()
         messageDb = db
         return db
@@ -231,7 +227,6 @@ class DatabaseProvider(private val context: Context) {
         val db = Room.databaseBuilder(context, NotiDatabase::class.java, dbFile.absolutePath)
             .openHelperFactory(openHelperFactory)
             .setJournalMode(RoomDatabase.JournalMode.TRUNCATE)
-            .fallbackToDestructiveMigration()
             .build()
         notiDb = db
         return db
@@ -245,7 +240,6 @@ class DatabaseProvider(private val context: Context) {
         val db = Room.databaseBuilder(context, ProjectDatabase::class.java, dbFile.absolutePath)
             .openHelperFactory(openHelperFactory)
             .setJournalMode(RoomDatabase.JournalMode.TRUNCATE)
-            .fallbackToDestructiveMigration()
             .build()
         projectDb = db
         return db
@@ -259,8 +253,6 @@ class DatabaseProvider(private val context: Context) {
         val db = Room.databaseBuilder(context, SettingDatabase::class.java, dbFile.absolutePath)
             .openHelperFactory(openHelperFactory)
             .setJournalMode(RoomDatabase.JournalMode.TRUNCATE)
-            // setting.db: 로컬 유저 설정만 저장. 재빌드 가능 — destructive OK.
-            .fallbackToDestructiveMigration()
             .build()
         settingDb = db
         return db
