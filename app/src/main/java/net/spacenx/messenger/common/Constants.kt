@@ -8,9 +8,9 @@ import java.util.UUID
 object Constants {
 
     const val TAG = "HybridWebMessenger"
-    const val BUILDDATE = "ZD21"
+    const val BUILDDATE = "ZD22"
 
-    // 메시지 구분자 (소켓 통신용)
+    //@Deprecated 메시지 구분자 (소켓 통신용)
     //const val MESSAGE_DELIMITER = '\u000C' // form feed
 
     // 메시지 타입

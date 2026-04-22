@@ -430,7 +430,6 @@ class MainActivity : AppCompatActivity() {
             scope = lifecycleScope,
             onLoggedIn = {
                 pushEventRouter.register()
-                runOnUiThread { btnDevLog.visibility = View.VISIBLE }
             },
             hasPendingDeepLink = { pendingDeepLinkIntent != null },
             onConsumeDeepLink = { consumePendingDeepLink() },
@@ -804,7 +803,6 @@ class MainActivity : AppCompatActivity() {
     fun requestLogout() {
         Log.d(TAG, "requestLogout called")
         isLogoutRequested = true
-        btnDevLog.visibility = View.GONE
         loginViewModel.logout()
     }
 
@@ -942,6 +940,21 @@ class MainActivity : AppCompatActivity() {
             override fun onReceivedSslError(
                 view: WebView?, handler: android.webkit.SslErrorHandler?, error: android.net.http.SslError?
             ) { handler?.proceed() }
+
+            // 진단용: WebView renderer가 OS에 killed되거나 crash되면 호출됨.
+            // 원인 확인 후 제거/조치 고려 (memory pressure로 인한 renderer kill 추적).
+            override fun onRenderProcessGone(
+                view: WebView?,
+                detail: android.webkit.RenderProcessGoneDetail?
+            ): Boolean {
+                Log.w(TAG, "SubWebView renderer GONE: didCrash=${detail?.didCrash()}, " +
+                    "priority=${detail?.rendererPriorityAtExit()}, url=${view?.url}")
+
+                FileLogger.log(TAG, "SubWebView renderer GONE: didCrash=${detail?.didCrash()}, " +
+                        "priority=${detail?.rendererPriorityAtExit()}, url=${view?.url}")
+
+                return true  // true = 앱 크래시 방지
+            }
 
             /**
              * 임시 방어책: 동일 userId에 대해 openUserDetail 이 중복 호출될 때
@@ -1227,6 +1240,23 @@ class MainActivity : AppCompatActivity() {
                 }
                 val fallback = appConfig.getSpaUrl()
                 view?.post { view.loadUrl(fallback) }
+            }
+
+            // 진단용: WebView renderer가 OS에 killed되거나 crash되면 호출됨.
+            // 백그라운드에서 메모리 회수되면 복귀 시 흰 화면 원인이 됨 → SPA 재로딩.
+            override fun onRenderProcessGone(
+                view: WebView?,
+                detail: android.webkit.RenderProcessGoneDetail?
+            ): Boolean {
+                Log.w(TAG, "WebView renderer GONE: didCrash=${detail?.didCrash()}, " +
+                    "priority=${detail?.rendererPriorityAtExit()}, url=${view?.url}")
+
+                view?.loadUrl(appConfig.getSpaUrl())
+
+                FileLogger.log(TAG, "WebView renderer GONE: didCrash=${detail?.didCrash()}, " +
+                        "priority=${detail?.rendererPriorityAtExit()}, url=${view?.url}")
+
+                return true  // true = 앱 크래시 방지, WebView만 재로딩
             }
 
             override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {

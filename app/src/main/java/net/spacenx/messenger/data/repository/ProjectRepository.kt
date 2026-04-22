@@ -1012,6 +1012,18 @@ class ProjectRepository(
         }
     }
 
+    /** getAllIssues bridge action: 전체 이슈를 issueToJson() 풀 필드로 반환 */
+    suspend fun getAllIssuesAsJson(): JSONObject = withContext(Dispatchers.IO) {
+        if (!dbProvider.isInitialized()) return@withContext JSONObject().put("errorCode", 0).put("issues", JSONArray())
+        try {
+            val issues = dbProvider.getProjectDatabase().issueDao().getAll()
+            JSONObject().put("errorCode", 0).put("issues", issuesToJsonArray(issues))
+        } catch (e: Exception) {
+            Log.e(TAG, "getAllIssuesAsJson error: ${e.message}")
+            JSONObject().put("errorCode", -1).put("errorMessage", e.message)
+        }
+    }
+
     suspend fun getThreadsByChannel(channelCode: String): JSONObject = withContext(Dispatchers.IO) {
         try {
             val db = dbProvider.getProjectDatabase()

@@ -429,38 +429,8 @@ class BridgeDispatcher(
                 // ── 전체 이슈 조회 ──
                 "getAllIssues" -> scope.launch {
                     val cbId = paramStr(params, "_callbackId").ifEmpty { "getAllIssues" }
-                    if (!dbProvider.isInitialized()) {
-                        resolveToJs(cbId, JSONObject().put("errorCode", 0).put("issues", JSONArray()))
-                        return@launch
-                    }
-                    try {
-                        val result = withContext(Dispatchers.IO) {
-                            val db = dbProvider.getProjectDatabase()
-                            val issues = db.issueDao().getAll()
-                            val arr = JSONArray()
-                            for (issue in issues) {
-                                arr.put(JSONObject().apply {
-                                    put("issueCode", issue.issueCode)
-                                    put("projectCode", issue.projectCode)
-                                    put("channelCode", issue.channelCode)
-                                    put("title", issue.title)
-                                    put("issueStatus", issue.issueStatus)
-                                    put("priority", issue.priority)
-                                    put("assigneeUserId", issue.assigneeUserId)
-                                    put("reporterUserId", issue.reporterUserId)
-                                    if (issue.dueDate > 0) put("dueDate", issue.dueDate)
-                                    if (issue.createdDate > 0) put("createdDate", issue.createdDate)
-                                    if (issue.modDate > 0) put("modDate", issue.modDate)
-                                    put("threadCode", issue.threadCode)
-                                    put("commentCount", issue.commentCount)
-                                })
-                            }
-                            JSONObject().put("errorCode", 0).put("issues", arr)
-                        }
-                        resolveToJs(cbId, result)
-                    } catch (e: Exception) {
-                        rejectToJs(cbId, e.message)
-                    }
+                    try { resolveToJs(cbId, projectRepo.getAllIssuesAsJson()) }
+                    catch (e: Exception) { rejectToJs(cbId, e.message) }
                 }
 
                 // 제거됨: dbQuery·openChannelRoom·searchChannelRoom·getUserInfo·getStatusMobile — nx 미호출.

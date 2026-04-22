@@ -23,7 +23,7 @@
         android:layout_height="wrap_content"
         android:visibility="gone" />
 
-    <!-- 개발자용 파일로그 설정 버튼 (우측 세로중앙) -->
+    <!-- 개발자용 파일로그 설정 버튼 (우측 세로중앙). 추후 설정탭으로 이관 예정 -->
     <ImageButton
         android:id="@+id/btnDevLog"
         android:layout_width="32dp"
@@ -34,6 +34,6 @@
         android:background="@android:color/transparent"
         android:alpha="0.4"
         android:contentDescription="파일 로그 설정"
-        android:visibility="gone" />
+        android:visibility="visible" />
 
 </FrameLayout>
