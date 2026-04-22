@@ -150,12 +150,14 @@ class ChatHandler(
                     put("channelCode", c.channelCode)
                     put("sendUserId", c.sendUserId)
                     put("sendUserName", ctx.userNameCache.resolve(c.sendUserId ?: ""))
-                    put("contents", if (c.state == 1) "삭제된 메시지" else c.contents)
+                    val isDeleted = c.state == 1 || c.state == -1
+                    put("contents", if (isDeleted) "삭제된 메시지" else c.contents)
                     put("sendDate", c.sendDate)
-                    put("additional", if (c.state != 1 && sanitized.isNotEmpty()) try { JSONObject(sanitized) } catch (_: Exception) { JSONObject() } else JSONObject())
+                    put("additional", if (!isDeleted && sanitized.isNotEmpty()) try { JSONObject(sanitized) } catch (_: Exception) { JSONObject() } else JSONObject())
                     put("chatType", c.chatType)
                     put("chatFont", c.chatFont ?: "")
                     put("state", c.state)
+                    put("deleted", isDeleted)
                     put("unreadCount", unreadCount)
                     put("commentCount", thread?.commentCount ?: 0)
                     if (thread != null) put("threadCode", thread.threadCode)
@@ -292,11 +294,20 @@ class ChatHandler(
                     val existing = chatDb.chatDao().getByChatCode(chatCode)
                     if (existing != null) {
                         chatDb.chatDao().insert(existing.copy(state = 1))
+                        val channelCode = existing.channelCode
+                        val fallback = chatDb.chatDao().getLastVisibleChatSync(channelCode)
+                        chatDb.channelDao().updateLastChatSync(
+                            channelCode = channelCode,
+                            date = fallback?.sendDate ?: 0L,
+                            contents = fallback?.contents ?: "",
+                            lastSendUserId = fallback?.sendUserId ?: ""
+                        )
                     }
                 }
             }
             withContext(Dispatchers.IO) { ctx.updateCrudOffset("deletechat", result) }
             ctx.resolveToJs("deleteChat", result)
+            ctx.notifyReactOnce("channelReady")
         } catch (e: Exception) {
             ctx.rejectToJs("deleteChat", e.message)
         }

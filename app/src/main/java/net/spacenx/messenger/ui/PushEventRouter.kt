@@ -153,6 +153,11 @@ class PushEventRouter(
                             bridgeDispatcher.notifyReactOnce("channelReady")
                         }
 
+                        // DeleteChatEvent → channelReady (채널 목록 lastChat 갱신)
+                        if (cmd == ProtocolCommand.DELETE_CHAT_EVENT) {
+                            bridgeDispatcher.notifyReactOnce("channelReady")
+                        }
+
                         // 멤버 입장/퇴장 → channelReady
                         if (cmd == ProtocolCommand.ADD_CHANNEL_MEMBER_EVENT ||
                             cmd == ProtocolCommand.REMOVE_CHANNEL_MEMBER_EVENT) {

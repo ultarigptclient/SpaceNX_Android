@@ -69,4 +69,8 @@ interface ChatDao {
     /** 미확인 메시지 수: offsetDate 이후 + 내가 보내지 않은 메시지 */
     @Query("SELECT COUNT(*) FROM chats WHERE channelCode = :channelCode AND sendDate > :offsetDate AND sendUserId != :myUserId AND state = 0")
     suspend fun countUnread(channelCode: String, offsetDate: Long, myUserId: String): Int
+
+    /** 채널의 마지막 가시 채팅 (삭제되지 않음 + 시스템/날짜 구분자 제외). runInTransaction 내부용. */
+    @Query("SELECT * FROM chats WHERE channelCode = :channelCode AND state = 0 AND chatType NOT IN (0, 32, 64, 99) ORDER BY sendDate DESC LIMIT 1")
+    fun getLastVisibleChatSync(channelCode: String): ChatEntity?
 }

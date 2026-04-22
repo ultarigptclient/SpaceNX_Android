@@ -430,7 +430,7 @@ class ChannelSyncRepository(
                                     rawChatType == "SYSTEM" || rawChatType == "system" -> 32
                                     rawChatType is Number -> {
                                         val n = rawChatType.toInt()
-                                        if (n == 6) 32 else n  // 레거시 서버 SYSTEM=6 흡수
+                                        if (n == 6 || n == 99) 32 else n  // 레거시 서버 SYSTEM=6/99 흡수
                                     }
                                     else -> c.optInt("chatType", 0)
                                 }
@@ -496,13 +496,24 @@ class ChannelSyncRepository(
                         }
                     }
                     if (reactionUpdates.isNotEmpty()) Log.d(TAG, "syncChat: ${reactionUpdates.size} REACTION/MOD events processed")
+                    val deletedCodesByChannel = deletedChats.groupBy({ it.first }, { it.second })
+                        .mapValues { it.value.toSet() }
                     for ((channelCode, chatObj) in lastChatPerChannel) {
-                        chatDb.channelDao().updateLastChatSync(
-                            channelCode = channelCode,
-                            date = chatObj.optLong("sendDate", 0L),
-                            contents = chatObj.optString("contents", ""),
-                            lastSendUserId = chatObj.optString("sendUserId", "")
-                        )
+                        val wasDeleted = deletedCodesByChannel[channelCode]
+                            ?.contains(chatObj.optString("chatCode", "")) == true
+                        if (wasDeleted) {
+                            val fallback = chatDb.chatDao().getLastVisibleChatSync(channelCode)
+                            chatDb.channelDao().updateLastChatSync(channelCode, fallback?.sendDate ?: 0L, fallback?.contents ?: "", fallback?.sendUserId ?: "")
+                        } else {
+                            chatDb.channelDao().updateLastChatSync(channelCode, chatObj.optLong("sendDate", 0L), chatObj.optString("contents", ""), chatObj.optString("sendUserId", ""))
+                        }
+                    }
+                    // ADD 없이 DEL만 온 채널: 현재 lastChat이 삭제됐을 수 있으므로 재계산
+                    for (channelCode in deletedCodesByChannel.keys) {
+                        if (channelCode !in lastChatPerChannel) {
+                            val fallback = chatDb.chatDao().getLastVisibleChatSync(channelCode)
+                            chatDb.channelDao().updateLastChatSync(channelCode, fallback?.sendDate ?: 0L, fallback?.contents ?: "", fallback?.sendUserId ?: "")
+                        }
                     }
                     if (lastEventId > lastOffset) {
                         chatDb.syncMetaDao().insertSync(SyncMetaEntity(CHAT_SYNC_META_KEY, lastEventId))

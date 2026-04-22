@@ -207,22 +207,13 @@ class SocketSessionManager(
         _loginState.emit(state)
     }
 
-    fun connect(config: ConnectionConfig) {
-        lastConnectionConfig = config
-        reconnectDelaySec = 5
-        reconnectAttempts = 0
-        binarySocketClient = createSocketClient(config)
-        CoroutineScope(Dispatchers.IO).launch {
-            binarySocketClient!!.connect()
-        }
-    }
-
     suspend fun connectSuspend(config: ConnectionConfig) {
         lastConnectionConfig = config
         reconnectDelaySec = 5
         reconnectAttempts = 0
-        binarySocketClient = createSocketClient(config)
-        binarySocketClient!!.connect()
+        val client = createSocketClient(config)
+        binarySocketClient = client
+        client.connect()
     }
 
     fun disconnect() {

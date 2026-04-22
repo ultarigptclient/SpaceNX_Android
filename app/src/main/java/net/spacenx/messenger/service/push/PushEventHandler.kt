@@ -262,6 +262,15 @@ class PushEventHandler(
         if (existing != null) {
             chatDb.chatDao().insert(existing.copy(state = 1))
             Log.d(TAG, "handleDeleteChatEvent: chatCode=$chatCode marked as deleted")
+            if (channelCode.isNotEmpty()) {
+                val fallback = chatDb.chatDao().getLastVisibleChatSync(channelCode)
+                chatDb.channelDao().updateLastChatSync(
+                    channelCode = channelCode,
+                    date = fallback?.sendDate ?: 0L,
+                    contents = fallback?.contents ?: "",
+                    lastSendUserId = fallback?.sendUserId ?: ""
+                )
+            }
         } else {
             Log.w(TAG, "handleDeleteChatEvent: chatCode=$chatCode not found in DB")
         }
